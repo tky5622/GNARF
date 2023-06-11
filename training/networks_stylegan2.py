@@ -11,6 +11,8 @@
 Matches the original implementation of configs E-F by Karras et al. at
 https://github.com/NVlabs/stylegan2/blob/master/training/networks_stylegan2.py"""
 
+### GNARF don't change stylegan2 network
+
 import numpy as np
 import torch
 from torch_utils import misc
@@ -19,6 +21,13 @@ from torch_utils.ops import conv2d_resample
 from torch_utils.ops import upfirdn2d
 from torch_utils.ops import bias_act
 from torch_utils.ops import fma
+
+
+import _util.pytorch_v1 as utorch
+import _util.util_v1 as uutil
+import _util.pytorch_v1 as utorch
+import _util.twodee_v1 as u2d
+
 
 #----------------------------------------------------------------------------
 
@@ -194,6 +203,7 @@ class MappingNetwork(torch.nn.Module):
         c_dim,                      # Conditioning label (C) dimensionality, 0 = no label.
         w_dim,                      # Intermediate latent (W) dimensionality.
         num_ws,                     # Number of intermediate latents to output, None = do not broadcast.
+        cond_mode,
         num_layers      = 8,        # Number of mapping layers.
         embed_features  = None,     # Label embedding dimensionality, None = same as w_dim.
         layer_features  = None,     # Number of intermediate features in the mapping layers, None = same as w_dim.
@@ -209,6 +219,19 @@ class MappingNetwork(torch.nn.Module):
         self.num_layers = num_layers
         self.w_avg_beta = w_avg_beta
 
+        ## panic3d added
+        self.cond_mode = cond_mode
+        cm = self.cond_mode.split('.')
+
+        # resnet condition (private)
+        self.resnet_cond = 0
+        for m in cm:
+            if m.startswith('resnetcond_'):
+                self.resnet_cond = int(m.split('_')[-1])
+                assert self.c_dim > 0  # weird things happen if not
+                break
+        ## panic3d section end
+
         if embed_features is None:
             embed_features = w_dim
         if c_dim == 0:
@@ -218,7 +241,8 @@ class MappingNetwork(torch.nn.Module):
         features_list = [z_dim + embed_features] + [layer_features] * (num_layers - 1) + [w_dim]
 
         if c_dim > 0:
-            self.embed = FullyConnectedLayer(c_dim, embed_features)
+            # panic3d add c_dim +self.resnet_condition
+            self.embed = FullyConnectedLayer(c_dim+self.resnet_cond, embed_features)
         for idx in range(num_layers):
             in_features = features_list[idx]
             out_features = features_list[idx + 1]
@@ -227,8 +251,9 @@ class MappingNetwork(torch.nn.Module):
 
         if num_ws is not None and w_avg_beta is not None:
             self.register_buffer('w_avg', torch.zeros([w_dim]))
-
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False):
+    
+    # panic3d add cond
+    def forward(self, z, c, cond, truncation_psi=1, truncation_cutoff=None, update_emas=False):
         # Embed, normalize, and concat inputs.
         x = None
         with torch.autograd.profiler.record_function('input'):
@@ -237,6 +262,14 @@ class MappingNetwork(torch.nn.Module):
                 x = normalize_2nd_moment(z.to(torch.float32))
             if self.c_dim > 0:
                 misc.assert_shape(c, [None, self.c_dim])
+                #panic3d added 
+                if self.resnet_cond > 0:
+                    assert 'resnet_feats' in cond
+                    # print(self.resnet_cond)
+                    # print(c.shape)
+                    # print(cond['resnet_feats'].shape)
+                    c = torch.cat([c, cond['resnet_feats'][:,:self.resnet_cond]], dim=1)
+                ## panic3d end 
                 y = normalize_2nd_moment(self.embed(c.to(torch.float32)))
                 x = torch.cat([x, y], dim=1) if x is not None else y
 
@@ -469,6 +502,7 @@ class SynthesisNetwork(torch.nn.Module):
         w_dim,                      # Intermediate latent (W) dimensionality.
         img_resolution,             # Output image resolution.
         img_channels,               # Number of color channels.
+        cond_mode,                  # panic3d 
         channel_base    = 32768,    # Overall multiplier for the number of channels.
         channel_max     = 512,      # Maximum number of channels in any layer.
         num_fp16_res    = 4,        # Use FP16 for the N highest resolutions.
@@ -476,6 +510,7 @@ class SynthesisNetwork(torch.nn.Module):
     ):
         assert img_resolution >= 4 and img_resolution & (img_resolution - 1) == 0
         super().__init__()
+        self.cond_mode = cond_mode # panic3d
         self.w_dim = w_dim
         self.img_resolution = img_resolution
         self.img_resolution_log2 = int(np.log2(img_resolution))

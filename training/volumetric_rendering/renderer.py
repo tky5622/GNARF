@@ -17,24 +17,37 @@ import torch.nn.functional as F
 from smplx.utils import SMPLOutput
 import open3d as o3d
 import consts
+import _util.util_v1 as uutil
 
-def generate_planes():
+# use_triplane is panic3d's one
+def generate_planes(use_triplane=False):
     """
     Defines planes by the three vectors that form the "axes" of the
     plane. Should work with arbitrary number of planes and planes of
     arbitrary orientation.
     """
-    return torch.tensor([[[1, 0, 0],
-                            [0, 1, 0],
-                            [0, 0, 1]],
-                            [[1, 0, 0],
-                            [0, 0, 1],
-                            [0, 1, 0]],
-                            [[0, 0, 1],
-                            [1, 0, 0],
-                            [0, 1, 0]]], dtype=torch.float32)
+    return torch.tensor([
+        [
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+        ],[
+            [1, 0, 0],
+            [0, 0, 1],
+            [0, 1, 0],
+        ],[
+            [0, 0, 1],
+            [1, 0, 0],
+            [0, 1, 0],
+        ] if not use_triplane else [
+            [0, 1, 0],
+            [0, 0, 1],
+            [1, 0, 0],
+        ],
+    ], dtype=torch.float32)
 
-def project_onto_planes(planes, coordinates):
+# add use_multiplane to avoid confilct of panic3d
+def project_onto_planes(planes, coordinates, use_multiplane=False):
     """
     Does a projection of a 3D point onto a batch of 2D planes,
     returning 2D plane coordinates.
@@ -48,20 +61,55 @@ def project_onto_planes(planes, coordinates):
     coordinates = coordinates.unsqueeze(1).expand(-1, n_planes, -1, -1).reshape(N*n_planes, M, 3)
     inv_planes = torch.linalg.inv(planes).unsqueeze(0).expand(N, -1, -1, -1).reshape(N*n_planes, 3, 3)
     projections = torch.bmm(coordinates, inv_planes)
-    return projections[..., :2]
 
-def sample_from_planes(plane_axes, plane_features, coordinates, mode='bilinear', padding_mode='zeros', box_warp=None, box_warp_pre_deform=False):
-    assert padding_mode == 'zeros'
-    N, n_planes, C, H, W = plane_features.shape
-    _, M, _ = coordinates.shape
-    plane_features = plane_features.view(N*n_planes, C, H, W)
+    return projections
+    # return projections[..., :2]
+    # return is changed to use multiplane at sample from planes
 
-    if not box_warp_pre_deform:
+# TODO: there are huge conflict. check details later 
+def sample_from_planes(
+        plane_axes, 
+        plane_features, 
+        coordinates, 
+        mode='bilinear', 
+        padding_mode='zeros', 
+        box_warp=None, 
+        box_warp_pre_deform=False,
+        # changeing triplane_depth means adopt multiplane
+        triplane_depth=1
+        ):
+
+    # panic3d add triplane_depth
+    # normal eg3d = GNARF    
+    if triplane_depth==1:  # normal eg3d
+        assert padding_mode == 'zeros'
+        N, n_planes, C, H, W = plane_features.shape
+        _, M, _ = coordinates.shape
+        plane_features = plane_features.view(N*n_planes, C, H, W)
+
+        # this condtion is added by GNARF
+        if not box_warp_pre_deform:
+            coordinates = (2/box_warp) * coordinates # TODO: add specific box bounds
+
+        projected_coordinates = project_onto_planes(plane_axes, coordinates)[..., :2].unsqueeze(1)
+        # it is because of "return projections", originally, "return projections[..., :2]"
+        # panic3d
+        # projected_coordinates = project_onto_planes(plane_axes, coordinates)[..., :2].unsqueeze(1)
+        output_features = torch.nn.functional.grid_sample(plane_features, projected_coordinates.float(), mode=mode, padding_mode=padding_mode, align_corners=False).permute(0, 3, 2, 1).reshape(N, n_planes, M, C)
+        return output_features
+    
+    else:  # yichuns multiplane
+        assert padding_mode == 'zeros'
+        N, n_planes, CD, H, W = plane_features.shape
+        _, M, _ = coordinates.shape
+        C, D = CD // triplane_depth, triplane_depth
+        plane_features = plane_features.view(N*n_planes, C, D, H, W)
+
         coordinates = (2/box_warp) * coordinates # TODO: add specific box bounds
 
-    projected_coordinates = project_onto_planes(plane_axes, coordinates).unsqueeze(1)
-    output_features = torch.nn.functional.grid_sample(plane_features, projected_coordinates.float(), mode=mode, padding_mode=padding_mode, align_corners=False).permute(0, 3, 2, 1).reshape(N, n_planes, M, C)
-    return output_features
+        projected_coordinates = project_onto_planes(plane_axes, coordinates).unsqueeze(1).unsqueeze(2) # (N x n_planes) x 1 x 1 x M x 3
+        output_features = torch.nn.functional.grid_sample(plane_features, projected_coordinates.float(), mode=mode, padding_mode=padding_mode, align_corners=False).permute(0, 4, 3, 2, 1).reshape(N, n_planes, M, C)
+        return output_features
 
 def sample_from_3dgrid(grid, coordinates):
     """
@@ -78,11 +126,31 @@ def sample_from_3dgrid(grid, coordinates):
     sampled_features = sampled_features.permute(0, 4, 3, 2, 1).reshape(N, H*W*D, C)
     return sampled_features
 
+def triplane_crop_mask(xyz_unformatted, thresh, boxwarp, allow_bottom=True):
+    bw,tc = boxwarp, thresh
+    device = xyz_unformatted.device
+    # xyz = 0.5 * (xyz_unformatted+1) * torch.tensor([-1,1,-1]).to(device)[None,None,:]
+    xyz = (xyz_unformatted) * torch.tensor([-1,1,-1]).to(device)[None,None,:]
+    ans = (xyz[:,:,[0,2]].abs() <= (bw/2-tc)).all(dim=-1,keepdim=True)
+    if allow_bottom:
+        ans = ans | (
+            (xyz[:,:,1:2] <= -(bw/2-tc)) &
+            (xyz[:,:,[0,2]].abs() <= (bw/2-tc)).all(dim=-1,keepdim=True)
+        )
+    return ~ans
+def cull_clouds_mask(denities, thresh):
+    denities = torch.nn.functional.softplus(denities - 1) # activation bias of -1 makes things initialize better
+    alpha = 1 - torch.exp(-denities)
+    return alpha < thresh
+
+
+
 class ImportanceRenderer(torch.nn.Module):
-    def __init__(self, rendering_kwargs=None):
+    # use_triplane=False is added 
+    def __init__(self, use_triplane=False, rendering_kwargs=None):
         super().__init__()
         self.ray_marcher = MipRayMarcher2()
-        self.plane_axes = generate_planes()
+        self.plane_axes = generate_planes(use_triplane=use_triplane)
 
         smpl_base = smpl_helper.load_smpl_model(smpl_helper.get_smpl_data_path('m'))
         self.smpl_reduced = smpl_helper.SMPLSimplified.build_from_template(smpl_base, growth_offset=0.0)
@@ -91,6 +159,7 @@ class ImportanceRenderer(torch.nn.Module):
 
         self._register_avg_smpl(rendering_kwargs)
 
+    # for GNARF
     def _register_avg_smpl(self, rendering_kwargs):
         if rendering_kwargs['cfg_name'] == 'aist':
             avg_body_pose = torch.from_numpy(np.array(consts.AIST_BODYPOSE_AVG)[None, ...]).float().contiguous()
@@ -137,9 +206,17 @@ class ImportanceRenderer(torch.nn.Module):
         self.register_buffer('smpl_avg_scale', avg_scale)
         self._avg_pose_initialized = True
 
-    def forward(self, planes, decoder, ray_origins, ray_directions, rendering_options, smpl_params=None, warp_grid=None, camera_params=None):
+    def forward(
+            self, planes, 
+            decoder, ray_origins, 
+            ray_directions, rendering_options, 
+            smpl_params=None, warp_grid=None, camera_params=None, #added by GNARF 
+            triplane_crop=None, cull_clouds=None, binarize_clouds=None # added by panic3d
+            ):
         # self.plane_axes.requires_grad = False
         # assert self.plane_axes.requires_grad == False
+
+        # GANRF add below sections 
         self.plane_axes = self.plane_axes.to(ray_origins.device)
 
         smpl_orient = smpl_params[:, :3]
@@ -300,12 +377,25 @@ class ImportanceRenderer(torch.nn.Module):
         return rgb_final, depth_final, weights.sum(2)
 
     def run_model(self, planes, decoder, sample_coordinates, sample_directions, options):
-        sampled_features = sample_from_planes(self.plane_axes, planes, sample_coordinates, padding_mode='zeros', box_warp=options['box_warp'],
-                                              box_warp_pre_deform=options['box_warp_pre_deform'])
+        sampled_features = sample_from_planes(
+            self.plane_axes, 
+            planes, 
+            sample_coordinates, 
+            padding_mode='zeros', 
+            box_warp=options['box_warp'],
+            # added by GNARF
+            box_warp_pre_deform=options['box_warp_pre_deform'],
+            # added by panic3d
+            triplane_depth=1 if 'triplane_depth' not in options else options['triplane_depth']
+            )
 
         out = decoder(sampled_features, sample_directions)
         if options.get('density_noise', 0) > 0:
             out['sigma'] += torch.randn_like(out['sigma']) * options['density_noise']
+                    # print(out['rgb'].shape)
+        # added by panic3d
+        out['xyz'] = sample_coordinates#.permute(0,2,1)[...,None]
+
         return out
 
     def needs_clip_mask(self, rendering_options):
@@ -349,17 +439,22 @@ class ImportanceRenderer(torch.nn.Module):
         all_densities = torch.gather(all_densities, -2, indices.expand(-1, -1, -1, 1))
         return all_depths, all_colors, all_densities
 
-    def unify_samples(self, depths1, colors1, densities1, depths2, colors2, densities2):
+    # def unify_samples(self, depths1, colors1, densities1, depths2, colors2, densities2):
+    def unify_samples(self, depths1, colors1, densities1, xyz1, depths2, colors2, densities2, xyz2):
         all_depths = torch.cat([depths1, depths2], dim = -2)
         all_colors = torch.cat([colors1, colors2], dim = -2)
+        # panic3d
+        all_xyz = torch.cat([xyz1, xyz2], dim = -2)
         all_densities = torch.cat([densities1, densities2], dim = -2)
 
         _, indices = torch.sort(all_depths, dim=-2)
         all_depths = torch.gather(all_depths, -2, indices)
         all_colors = torch.gather(all_colors, -2, indices.expand(-1, -1, -1, all_colors.shape[-1]))
+        # panic3d
+        all_xyz = torch.gather(all_xyz, -2, indices.expand(-1, -1, -1, all_xyz.shape[-1]))
         all_densities = torch.gather(all_densities, -2, indices.expand(-1, -1, -1, 1))
 
-        return all_depths, all_colors, all_densities
+        return all_depths, all_colors, all_densities, all_xyz #panic3d
 
     def sample_stratified(self, ray_origins, ray_start, ray_end, depth_resolution, disparity_space_sampling=False):
         """

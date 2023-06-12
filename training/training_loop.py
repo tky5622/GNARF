@@ -20,8 +20,10 @@ import legacy
 from metrics import metric_main
 from camera_utils import LookAtPoseSampler
 from training.crosssection_utils import sample_cross_section
+# panic3d add
 from .training_loop_v0 import training_loop as training_loop_v0
 
+#only GNARF use this, panic3d completely delete these lines
 #----------------------------------------------------------------------------
 
 def setup_snapshot_image_grid(training_set, random_seed=0):

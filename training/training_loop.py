@@ -1,10 +1,3 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Main training loop."""
 
@@ -27,6 +20,7 @@ import legacy
 from metrics import metric_main
 from camera_utils import LookAtPoseSampler
 from training.crosssection_utils import sample_cross_section
+from .training_loop_v0 import training_loop as training_loop_v0
 
 #----------------------------------------------------------------------------
 
@@ -435,44 +429,7 @@ def training_loop(
                 stats_metrics.update(result_dict.results)
         del snapshot_data # conserve memory
 
-        # Collect statistics.
-        for phase in phases:
-            value = []
-            if (phase.start_event is not None) and (phase.end_event is not None):
-                phase.end_event.synchronize()
-                value = phase.start_event.elapsed_time(phase.end_event)
-            training_stats.report0('Timing/' + phase.name, value)
-        stats_collector.update()
-        stats_dict = stats_collector.as_dict()
 
-        # Update logs.
-        timestamp = time.time()
-        if stats_jsonl is not None:
-            fields = dict(stats_dict, timestamp=timestamp)
-            stats_jsonl.write(json.dumps(fields) + '\n')
-            stats_jsonl.flush()
-        if stats_tfevents is not None:
-            global_step = int(cur_nimg / 1e3)
-            walltime = timestamp - start_time
-            for name, value in stats_dict.items():
-                stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
-            for name, value in stats_metrics.items():
-                stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
-            stats_tfevents.flush()
-        if progress_fn is not None:
-            progress_fn(cur_nimg // 1000, total_kimg)
 
-        # Update state.
-        cur_tick += 1
-        tick_start_nimg = cur_nimg
-        tick_start_time = time.time()
-        maintenance_time = tick_start_time - tick_end_time
-        if done:
-            break
 
-    # Done.
-    if rank == 0:
-        print()
-        print('Exiting...')
 
-#----------------------------------------------------------------------------

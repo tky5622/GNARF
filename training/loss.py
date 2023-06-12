@@ -1,10 +1,12 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 
 """Loss functions."""
 
@@ -20,6 +22,13 @@ from training.dual_discriminator import filtered_resizing
 # import _util.twodee_v1 as u2d
 
 # from .loss_orthocondA import StyleGAN2LossOrthoCondA
+
+import _util.util_v1 as uutil
+import _util.pytorch_v1 as utorch
+import _util.twodee_v1 as u2d
+
+from .loss_orthocondA import StyleGAN2LossOrthoCondA
+
 
 #----------------------------------------------------------------------------
 

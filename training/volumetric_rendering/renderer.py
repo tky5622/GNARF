@@ -30,6 +30,7 @@ import consts
 import _util.util_v1 as uutil
 from type.training import RenderingOptions
 from torchtyping import TensorType
+import training.volumetric_rendering.util_for_smpl_renderer as renderers
 
 # use_triplane is panic3d's one
 def generate_planes(use_triplane=False):
@@ -270,23 +271,55 @@ class ImportanceRenderer(torch.nn.Module):
             triplane_crop=None, cull_clouds=None, binarize_clouds=None # added by panic3d
             ):
         # self.plane_axes.requires_grad = False
-        # assert self.plane_axes.requires_grad == False
+        # assert self.plane_axes.requi  res_grad == False
 
         # GANRF add below sections 
         self.plane_axes = self.plane_axes.to(ray_origins.device)
-        # smpl_rendering()
-        # panic3d_rendering()
-
-        # if rendering_options['ray_start'] == rendering_options['ray_end'] == 'auto':
-        #     ray_start, ray_end = math_utils.get_ray_limits_box(ray_origins, ray_directions, box_side_length=rendering_options['box_warp'])
-        #     is_ray_valid = ray_end > ray_start
-        #     if torch.any(is_ray_valid).item():
-        #         ray_start[~is_ray_valid] = ray_start[is_ray_valid].min()
-        #         ray_end[~is_ray_valid] = ray_start[is_ray_valid].max()
-        #     depths_coarse = self.sample_stratified(ray_origins, ray_start, ray_end, rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
-        # else:
-        #     # Create stratified depth samples
-        #     depths_coarse = self.sample_stratified(ray_origins, rendering_options['ray_start'], rendering_options['ray_end'], rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
+        # renderers.smpl_rendering(
+        #     smpl_params, 
+        #     self.smpl_avg_body_pose, 
+        #     self.smpl_avg_transl, 
+        #     rendering_options, 
+        #     ray_directions, 
+        #     self.get_ray_limits_box,
+        #     ray_origins,
+        #     self.smpl_clip,
+        #     self.smpl_avg_betas,
+        #     self.smpl_avg_scale,
+        #     camera_params,
+        #     self.get_smpl_min_max_depth,
+        #     self.sample_stratified,
+        # )
+        smpl_translate = renderers.generate_smpl_translate(smpl_params, self.smpl_avg_body_pose, self.smpl_avg_transl)
+        sample_mask, ray_start, ray_end = renderers.generate_smpl_sample(
+            rendering_options,
+            ray_directions,
+            self.get_ray_limits_box,
+            ray_origins,
+            self.smpl_orient,
+            self.smpl_avg_body_pose,
+            self.smpl_clip,
+            self.smpl_avg_betas,
+            self.smpl_betas,
+            self.smpl_body_pose,
+            self.smpl_avg_scale,
+            camera_params,
+            self.get_smpl_min_max_depth,
+        )
+        depths_coarse = renderers.generate_depths_coarse(
+                    rendering_options, 
+                    ray_origins,
+                    self.sample_stratified,
+                    ray_start, ray_end
+        )
+        # panic3d
+        # depths_coarse = renderers.generate_depths_cpanic3d_rendering(
+        #     rendering_options,
+        #     math_utils,
+        #     ray_origins,
+        #     ray_directions,
+        #     self.sample_stratified #self
+        # )
 
         batch_size, num_rays, samples_per_ray, _ = depths_coarse.shape
         #GNARF

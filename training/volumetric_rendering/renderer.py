@@ -18,6 +18,8 @@ from smplx.utils import SMPLOutput
 import open3d as o3d
 import consts
 import _util.util_v1 as uutil
+from type.training import RenderingOptions
+from torchtyping import TensorType
 
 # use_triplane is panic3d's one
 def generate_planes(use_triplane=False):
@@ -47,7 +49,7 @@ def generate_planes(use_triplane=False):
     ], dtype=torch.float32)
 
 # add use_multiplane to avoid confilct of panic3d
-def project_onto_planes(planes, coordinates, use_multiplane=False):
+def project_onto_planes(planes, coordinates):
     """
     Does a projection of a 3D point onto a batch of 2D planes,
     returning 2D plane coordinates.
@@ -95,20 +97,37 @@ def sample_from_planes(
         # it is because of "return projections", originally, "return projections[..., :2]"
         # panic3d
         # projected_coordinates = project_onto_planes(plane_axes, coordinates)[..., :2].unsqueeze(1)
-        output_features = torch.nn.functional.grid_sample(plane_features, projected_coordinates.float(), mode=mode, padding_mode=padding_mode, align_corners=False).permute(0, 3, 2, 1).reshape(N, n_planes, M, C)
+        output_features = torch.nn.functional.grid_sample(
+            plane_features, 
+            projected_coordinates.float(), 
+            mode=mode, 
+            padding_mode=padding_mode, 
+            align_corners=False
+            ).permute(0, 3, 2, 1).reshape(N, n_planes, M, C)
         return output_features
     
     else:  # yichuns multiplane
+        # try to run this multiplane with GNARF
         assert padding_mode == 'zeros'
         N, n_planes, CD, H, W = plane_features.shape
         _, M, _ = coordinates.shape
         C, D = CD // triplane_depth, triplane_depth
         plane_features = plane_features.view(N*n_planes, C, D, H, W)
 
-        coordinates = (2/box_warp) * coordinates # TODO: add specific box bounds
+        # coordinates = (2/box_warp) * coordinates # TODO: add specific box bounds
+        # this condtion is added by GNARF
+        if not box_warp_pre_deform:
+            coordinates = (2/box_warp) * coordinates # TODO: add specific box bounds
+
 
         projected_coordinates = project_onto_planes(plane_axes, coordinates).unsqueeze(1).unsqueeze(2) # (N x n_planes) x 1 x 1 x M x 3
-        output_features = torch.nn.functional.grid_sample(plane_features, projected_coordinates.float(), mode=mode, padding_mode=padding_mode, align_corners=False).permute(0, 4, 3, 2, 1).reshape(N, n_planes, M, C)
+        output_features = torch.nn.functional.grid_sample(
+            plane_features, 
+            projected_coordinates.float(), 
+            mode=mode, 
+            padding_mode=padding_mode, 
+            align_corners=False
+            ).permute(0, 4, 3, 2, 1).reshape(N, n_planes, M, C)
         return output_features
 
 def sample_from_3dgrid(grid, coordinates):
@@ -147,7 +166,7 @@ def cull_clouds_mask(denities, thresh):
 
 class ImportanceRenderer(torch.nn.Module):
     # use_triplane=False is added 
-    def __init__(self, use_triplane=False, rendering_kwargs=None):
+    def __init__(self, use_triplane=False, rendering_kwargs: RenderingOptions | None =None):
         super().__init__()
         self.ray_marcher = MipRayMarcher2()
         self.plane_axes = generate_planes(use_triplane=use_triplane)
@@ -160,7 +179,7 @@ class ImportanceRenderer(torch.nn.Module):
         self._register_avg_smpl(rendering_kwargs)
 
     # for GNARF
-    def _register_avg_smpl(self, rendering_kwargs):
+    def _register_avg_smpl(self, rendering_kwargs: RenderingOptions):
         if rendering_kwargs['cfg_name'] == 'aist':
             avg_body_pose = torch.from_numpy(np.array(consts.AIST_BODYPOSE_AVG)[None, ...]).float().contiguous()
             avg_orient = torch.from_numpy(np.array(consts.AIST_ORIENT_AVG)[None, ...]).float().contiguous()

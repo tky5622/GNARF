@@ -1,3 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
 """
 The renderer is a module that takes in rays, decides where to sample along each
 ray, and computes pixel colors using the volume rendering equation.
@@ -63,8 +73,7 @@ def project_onto_planes(planes, coordinates):
     coordinates = coordinates.unsqueeze(1).expand(-1, n_planes, -1, -1).reshape(N*n_planes, M, 3)
     inv_planes = torch.linalg.inv(planes).unsqueeze(0).expand(N, -1, -1, -1).reshape(N*n_planes, 3, 3)
     projections = torch.bmm(coordinates, inv_planes)
-
-    return projections
+    return projections #[..., :2]  # yichuns multiplane
     # return projections[..., :2]
     # return is changed to use multiplane at sample from planes
 
@@ -129,6 +138,34 @@ def sample_from_planes(
             align_corners=False
             ).permute(0, 4, 3, 2, 1).reshape(N, n_planes, M, C)
         return output_features
+
+# def project_onto_planes(planes, coordinates):
+#     """
+#     Does a projection of a 3D point onto a batch of 2D planes,
+#     returning 2D plane coordinates.
+
+#     Takes plane axes of shape n_planes, 3, 3
+#     # Takes coordinates of shape N, M, 3
+#     # returns projections of shape N*n_planes, M, 2
+#     """
+#     N, M, C = coordinates.shape
+#     n_planes, _, _ = planes.shape
+#     coordinates = coordinates.unsqueeze(1).expand(-1, n_planes, -1, -1).reshape(N*n_planes, M, 3)
+#     inv_planes = torch.linalg.inv(planes).unsqueeze(0).expand(N, -1, -1, -1).reshape(N*n_planes, 3, 3)
+#     projections = torch.bmm(coordinates, inv_planes)
+#     return projections
+
+# def sample_from_planes(plane_axes, plane_features, coordinates, mode='bilinear', padding_mode='zeros', box_warp=None):
+#     assert padding_mode == 'zeros'
+#     N, n_planes, C, H, W = plane_features.shape
+#     _, M, _ = coordinates.shape
+#     plane_features = plane_features.view(N*n_planes, C, H, W)
+
+#     coordinates = (2/box_warp) * coordinates # TODO: add specific box bounds
+
+#     projected_coordinates = project_onto_planes(plane_axes, coordinates).unsqueeze(1)
+#     output_features = torch.nn.functional.grid_sample(plane_features, projected_coordinates.float(), mode=mode, padding_mode=padding_mode, align_corners=False).permute(0, 3, 2, 1).reshape(N, n_planes, M, C)
+#     return output_features
 
 def sample_from_3dgrid(grid, coordinates):
     """
@@ -237,119 +274,56 @@ class ImportanceRenderer(torch.nn.Module):
 
         # GANRF add below sections 
         self.plane_axes = self.plane_axes.to(ray_origins.device)
+        # smpl_rendering()
+        # panic3d_rendering()
 
-        smpl_orient = smpl_params[:, :3]
-        smpl_body_pose = smpl_params[:, 3:72]
-        smpl_betas = smpl_params[:, 72:82]
-        if smpl_params.shape[-1] > 82:
-            smpl_translate = smpl_params[:, 82:85]
-            # smpl_translate = torch.zeros_like(smpl_params[:, 82:85])
-        else:
-            batch_size = smpl_orient.shape[0]
-            bs_expand = batch_size if self.smpl_avg_body_pose.shape[0] == 1 else -1
-            smpl_translate = self.smpl_avg_transl.expand(bs_expand, -1)
-
-        if rendering_options['warping_mask'] == 'none':
-            sample_mask = None
-        elif rendering_options['warping_mask'] == 'cube':
-            if torch.isnan(ray_directions[0, 0, 0]).item():
-                # ray_start, ray_end = rendering_options['ray_start'], rendering_options['ray_end']
-                ray_start, ray_end = 0., 1.
-                sample_mask = None
-            else:
-                # -1,1 cube
-                ray_start, ray_end = self.get_ray_limits_box(ray_origins, ray_directions, rendering_options)
-                # Handle invalid cases.
-                is_ray_valid = ray_end > ray_start
-                if torch.any(is_ray_valid).item():
-                    ray_start[~is_ray_valid] = ray_start[is_ray_valid].min()
-                    ray_end[~is_ray_valid] = ray_start[is_ray_valid].max()
-                sample_mask = is_ray_valid[...,None,:].expand(-1, -1, rendering_options['depth_resolution'], -1).reshape(is_ray_valid.shape[0], -1)
-        elif rendering_options['warping_mask'] == 'mesh':
-            if torch.isnan(ray_directions[0, 0, 0]).item():
-                ray_start, ray_end = rendering_options['ray_start'], rendering_options['ray_end']
-                sample_mask = None
-            else:
-                batch_size = smpl_orient.shape[0]
-                bs_expand = batch_size if self.smpl_avg_body_pose.shape[0] == 1 else -1
-                if rendering_options.get('canon_logging', False):
-                    smpl_clip_current = self.smpl_clip(betas=self.smpl_avg_betas.expand(bs_expand, -1), body_pose=self.smpl_avg_body_pose.expand(bs_expand, -1), global_orient=self.smpl_avg_orient.expand(bs_expand, -1), transl=self.smpl_avg_transl.expand(bs_expand, -1))
-                else:
-                    smpl_clip_current = self.smpl_clip(betas=smpl_betas, body_pose=smpl_body_pose, global_orient=smpl_orient, transl=smpl_translate)
-                smpl_clip_current.vertices *= self.smpl_avg_scale
-                rendering_options.update({'cam2world': camera_params[0], 'intrinsics': camera_params[1]}) # bs x 4 x 4, bs x 3 x 3
-                ray_start, ray_end = self.get_smpl_min_max_depth(rendering_options, ray_directions, smpl_clip_current.vertices, self.smpl_clip.faces_t)
-                sample_mask = (ray_start[..., None, :] <= ray_end[..., None, :]).expand(-1, -1, rendering_options['depth_resolution'], -1).reshape(batch_size, -1)
-                if not sample_mask.max(dim=-1)[0].all():
-                    sample_mask = None
-                    # print(f'Warning, out of frame SMPL mesh detected!')
-        else:
-            raise NotImplementedError()
-
-        # Create stratified depth samples
-        if rendering_options['warping_mask'] == 'cube' or rendering_options['warping_mask'] == 'mesh':
-            depths_coarse = self.sample_stratified(ray_origins, ray_start, ray_end, rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
-        else:
-            depths_coarse = self.sample_stratified(ray_origins, rendering_options['ray_start'], rendering_options['ray_end'], rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
+        # if rendering_options['ray_start'] == rendering_options['ray_end'] == 'auto':
+        #     ray_start, ray_end = math_utils.get_ray_limits_box(ray_origins, ray_directions, box_side_length=rendering_options['box_warp'])
+        #     is_ray_valid = ray_end > ray_start
+        #     if torch.any(is_ray_valid).item():
+        #         ray_start[~is_ray_valid] = ray_start[is_ray_valid].min()
+        #         ray_end[~is_ray_valid] = ray_start[is_ray_valid].max()
+        #     depths_coarse = self.sample_stratified(ray_origins, ray_start, ray_end, rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
+        # else:
+        #     # Create stratified depth samples
+        #     depths_coarse = self.sample_stratified(ray_origins, rendering_options['ray_start'], rendering_options['ray_end'], rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
 
         batch_size, num_rays, samples_per_ray, _ = depths_coarse.shape
+        #GNARF
         bs_expand = batch_size if self.smpl_avg_body_pose.shape[0] == 1 else -1
+
 
         # Coarse Pass
         sample_coordinates = (ray_origins.unsqueeze(-2) + depths_coarse * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
         sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, samples_per_ray, -1).reshape(batch_size, -1, 3)
 
-        # change to be compatible with Eric's new models
-        if torch.isnan(ray_directions[0, 0, 0]).item() and rendering_options['projector'] == 'none':
-            smpl_reduced_current = None
-            smpl_reduced_canon = None
-        else:
-            smpl_reduced_current = self.smpl_reduced(betas=smpl_betas, body_pose=smpl_body_pose, global_orient=smpl_orient, transl=smpl_translate)
-            smpl_reduced_canon = self.smpl_reduced(betas=self.smpl_avg_betas.expand(bs_expand, -1),
-                                                   body_pose=self.smpl_avg_body_pose.expand(bs_expand, -1),
-                                                   global_orient=self.smpl_avg_orient.expand(bs_expand, -1),
-                                                   transl=self.smpl_avg_transl.expand(bs_expand, -1))
-            smpl_reduced_current.transl = smpl_translate
-            smpl_reduced_canon.transl = self.smpl_avg_transl.expand(bs_expand, -1)
-            smpl_reduced_current.vertices *= self.smpl_avg_scale
-            smpl_reduced_canon.vertices *= self.smpl_avg_scale
-
-        if rendering_options['box_warp_pre_deform']:
-            sample_coordinates = (2 / rendering_options['box_warp']) * sample_coordinates
-
-        sample_coordinates = self.get_canonical_coordinates(
-            sample_coordinates,
-            mask=sample_mask,
-            warp_field=warp_grid,
-            smpl_src=smpl_reduced_current,
-            smpl_dst=smpl_reduced_canon,
-            projector=rendering_options['projector']
-        )
-
-        # Precompute clip depths
-        smpl_clip_depths = None
-        if self.needs_clip_mask(rendering_options):
-            if rendering_options.get('canon_logging', False):
-                smpl_clip_current = self.smpl_clip(betas=self.smpl_avg_betas.expand(bs_expand, -1), body_pose=self.smpl_avg_body_pose.expand(bs_expand, -1),
-                                                   global_orient=self.smpl_avg_orient.expand(bs_expand, -1), transl=self.smpl_avg_transl.expand(bs_expand, -1))
-            else:
-                smpl_clip_current = self.smpl_clip(betas=smpl_betas, body_pose=smpl_body_pose, global_orient=smpl_orient, transl=smpl_translate)
-            smpl_clip_current.vertices *= self.smpl_avg_scale
-            if rendering_options['warping_mask'] == 'mesh':
-                rendering_options.update({'cam2world': camera_params[0], 'intrinsics': camera_params[1]}) # bs x 4 x 4, bs x 3 x 3
-            smpl_clip_depths = self.get_smpl_min_max_depth(rendering_options, ray_directions, smpl_clip_current.vertices, self.smpl_clip.faces_t)
 
         out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
         colors_coarse = out['rgb']
         densities_coarse = out['sigma']
+        xyz_coarse = out['xyz']
+        #add renderingfunction here() calc_mask
+        # if triplane_crop:
+        #     # print(xyz_fine.amin(dim=(0,1)))
+        #     # print(xyz_fine.amax(dim=(0,1)))
+        #     cropmask = triplane_crop_mask(xyz_coarse, triplane_crop, rendering_options['box_warp'])
+        #     densities_coarse[cropmask] = -1e3
+        # if binarize_clouds:
+        #     ccmask = cull_clouds_mask(densities_coarse, binarize_clouds)
+        #     densities_coarse[ccmask] = -1e3
+        #     densities_coarse[~ccmask] = 1e3
+        # elif cull_clouds:
+        #     ccmask = cull_clouds_mask(densities_coarse, cull_clouds)
+        #     densities_coarse[ccmask] = -1e3
+        # # if triplane_crop:
+        # #     cropmask = triplane_crop_mask(xyz_coarse, triplane_crop, rendering_options['box_warp'])
+        # #     densities_coarse[cropmask] = -1e3
+        # # print(out['rgb'].shape)
+        # # print(out['sigma'].shape)
         colors_coarse = colors_coarse.reshape(batch_size, num_rays, samples_per_ray, colors_coarse.shape[-1])
+        xyz_coarse = xyz_coarse.reshape(batch_size, num_rays, samples_per_ray, xyz_coarse.shape[-1])
         densities_coarse = densities_coarse.reshape(batch_size, num_rays, samples_per_ray, 1)
-
-        # Mask out invalid samples (optional).
-        is_sample_valid = None
-        if smpl_clip_depths is not None:
-            is_sample_valid = self.get_sample_mask(sample_depths=depths_coarse, min_max_depths=smpl_clip_depths)
-            densities_coarse = densities_coarse - 1000 * (1-is_sample_valid.float())
+        #mask_out_invalid_samples()
 
         # Fine Pass
         N_importance = rendering_options['depth_resolution_importance']
@@ -357,13 +331,17 @@ class ImportanceRenderer(torch.nn.Module):
             _, _, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
 
             depths_fine = self.sample_importance(depths_coarse, weights, N_importance)
-
-            sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, N_importance, -1).reshape(batch_size, -1, 3)
+            #GNARF
+            # sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, N_importance, -1).reshape(batch_size, -1, 3)
             sample_coordinates = (ray_origins.unsqueeze(-2) + depths_fine * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
-
-            if rendering_options['box_warp_pre_deform']:
+            
+            # shu added: have all directions point to center (for ambient-lit)
+            if rendering_options.get('directionless', False):
+                sample_directions = -sample_coordinates/sample_coordinates.norm(dim=-1, keepdim=True).clip(0.01)
+            # this option is for GNARF
+            elif rendering_options['box_warp_pre_deform']:
                 sample_coordinates = (2 / rendering_options['box_warp']) * sample_coordinates
-            sample_coordinates = self.get_canonical_coordinates(
+                sample_coordinates = self.get_canonical_coordinates(
                 sample_coordinates,
                 mask=sample_mask,
                 warp_field=warp_grid,
@@ -371,29 +349,62 @@ class ImportanceRenderer(torch.nn.Module):
                 smpl_dst=smpl_reduced_canon,
                 projector=rendering_options['projector']
             )
+            else:
+                sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, N_importance, -1).reshape(batch_size, -1, 3)
 
             out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
             colors_fine = out['rgb']
             densities_fine = out['sigma']
+            ##panic3d
+            xyz_fine = out['xyz']
+            if triplane_crop:
+                # print(xyz_fine.amin(dim=(0,1)))
+                # print(xyz_fine.amax(dim=(0,1)))
+                cropmask = triplane_crop_mask(xyz_fine, triplane_crop, rendering_options['box_warp'])
+                densities_fine[cropmask] = -1e3
+            if binarize_clouds:
+                ccmask = cull_clouds_mask(densities_fine, binarize_clouds)
+                densities_fine[ccmask] = -1e3
+                densities_fine[~ccmask] = 1e3
+            elif cull_clouds:
+                ccmask = cull_clouds_mask(densities_fine, cull_clouds)
+                densities_fine[ccmask] = -1e3
+            #end
             colors_fine = colors_fine.reshape(batch_size, num_rays, N_importance, colors_fine.shape[-1])
             densities_fine = densities_fine.reshape(batch_size, num_rays, N_importance, 1)
-
-            # Mask out invalid samples (optional).
-            if smpl_clip_depths is not None:
-                is_sample_valid = self.get_sample_mask(sample_depths=depths_fine, min_max_depths=smpl_clip_depths)
-                densities_fine = densities_fine - 1000 * (1-is_sample_valid.float())
-                #colors_fine = colors_fine * is_sample_valid.float()
-
-            all_depths, all_colors, all_densities = self.unify_samples(depths_coarse, colors_coarse, densities_coarse,
-                                                                  depths_fine, colors_fine, densities_fine)
+            #panic3d
+            xyz_fine = xyz_fine.reshape(batch_size, num_rays, N_importance, xyz_fine.shape[-1])
+            #mask_out_clip_depth()
+            #original GNARF code
+            #all_depths, all_colors, all_densities = self.unify_samples(depths_coarse, colors_coarse, densities_coarse,
+            #all_xyz, depths_coarse, colors_coarse, densities_coarse, xyz_coarse xyz_fine
+            all_depths, all_colors, all_densities, all_xyz = self.unify_samples(
+                depths_coarse, colors_coarse, densities_coarse, xyz_coarse,
+                depths_fine, colors_fine, densities_fine, xyz_fine,
+            )
 
             # Aggregate
-            rgb_final, depth_final, weights = self.ray_marcher(all_colors, all_densities, all_depths, rendering_options)
+            #GNARF
+            # rgb_final, depth_final, weights = self.ray_marcher(all_colors, all_densities, all_depths, rendering_options)
+            all_colors_ = torch.cat([all_colors, all_xyz], dim=-1)
+            rgb_final_, depth_final, weights = self.ray_marcher(all_colors_, all_densities, all_depths, rendering_options)
+            rgb_final = rgb_final_[...,:-3]
+            xyz_final = rgb_final_[...,-3:]
         else:
-            rgb_final, depth_final, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
+            #GNARF
+            # rgb_final, depth_final, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
+            colors_coarse_ = torch.cat([colors_coarse, xyz_coarse], dim=-1)
+            rgb_final_, depth_final, weights = self.ray_marcher(colors_coarse_, densities_coarse, depths_coarse, rendering_options)
+            rgb_final = rgb_final_[...,:-3]
+            xyz_final = rgb_final_[...,-3:]
 
+        # print(rgb_final.shape)
+        # print(depth_final.shape)
+        # print(weights.shape)
+        #GNARF
         if is_sample_valid is not None: depth_final = is_sample_valid.any(-2).float()
-        return rgb_final, depth_final, weights.sum(2)
+        # xyz_final is added
+        return rgb_final, depth_final, weights.sum(2), xyz_final
 
     def run_model(self, planes, decoder, sample_coordinates, sample_directions, options):
         sampled_features = sample_from_planes(
@@ -416,7 +427,7 @@ class ImportanceRenderer(torch.nn.Module):
         out['xyz'] = sample_coordinates#.permute(0,2,1)[...,None]
 
         return out
-
+    #GNARF added
     def needs_clip_mask(self, rendering_options):
         """ Checks if Mesh Clipping is enabled and possible. """
         return (rendering_options.get('project_inside_only', False) and rendering_options.get('cam2world') is not None and rendering_options.get('intrinsics') is not None) \
@@ -450,7 +461,8 @@ class ImportanceRenderer(torch.nn.Module):
         is_sample_valid &= (min_depth[...,None,:] <= max_depth[...,None,:])
         #is_sample_valid = is_sample_valid.reshape(is_sample_valid.shape[0], -1, 1)
         return is_sample_valid
-
+    #GNARF end
+    
     def sort_samples(self, all_depths, all_colors, all_densities):
         _, indices = torch.sort(all_depths, dim=-2)
         all_depths = torch.gather(all_depths, -2, indices)
@@ -499,7 +511,7 @@ class ImportanceRenderer(torch.nn.Module):
                 depths_coarse += torch.rand_like(depths_coarse) * depth_delta
 
         return depths_coarse
-
+    # linspace is added by GNARF
     def linspace(self, start: torch.Tensor, stop: torch.Tensor, num: int):
         """
         Creates a tensor of shape [num, *start.shape] whose values are evenly spaced from start to end, inclusive.
@@ -579,7 +591,7 @@ class ImportanceRenderer(torch.nn.Module):
 
         samples = bins_g[...,0] + (u-cdf_g[...,0])/denom * (bins_g[...,1]-bins_g[...,0])
         return samples
-
+    #GNARF added all below codes
     @torch.no_grad()
     def get_canonical_coordinates(self, coordinates,
                                   warp_field, smpl_src: SMPLOutput, smpl_dst: SMPLOutput,

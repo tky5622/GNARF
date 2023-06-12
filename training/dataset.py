@@ -1,10 +1,12 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 
 """Streaming images and labels from datasets created with dataset_tool.py."""
 
@@ -15,7 +17,6 @@ import PIL.Image
 import json
 import torch
 import dnnlib
-from pathlib import Path
 
 try:
     import pyspng
@@ -227,73 +228,190 @@ class ImageFolderDataset(Dataset):
         return image
 
     def _load_raw_labels(self):
-        labels = None
-        if 'dataset.mat' in self._all_fnames:
-            # This is faster and hence preferred.
-            import scipy.io as sio
-            labels = sio.loadmat(self._open_file('dataset.mat'))['labels']
-            labels = [(str(x[0][0]), x[1][0]) for x in labels]
-        elif 'dataset.json' in self._all_fnames:
-            with self._open_file('dataset.json') as f:
-                labels = json.load(f)['labels']
-        else:
+        fname = 'dataset.json'
+        if fname not in self._all_fnames:
             return None
+        with self._open_file(fname) as f:
+            labels = json.load(f)['labels']
         if labels is None:
             return None
         labels = dict(labels)
         labels = [labels[fname.replace('\\', '/')] for fname in self._image_fnames]
         labels = np.array(labels)
         labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
-
-        # AWB CHANGE: Load in body poses as well, only if they are in a separate file
-        if 'body_poses.json' in self._all_fnames:
-            with self._open_file('body_poses.json') as f: bodypose_labels = json.load(f)
-            if bodypose_labels is None: return labels
-
-            bodypose_labels = dict(bodypose_labels)
-            bodypose_labels = [bodypose_labels[Path(fname).stem] for fname in self._image_fnames]
-            bodypose_labels = np.array(bodypose_labels)
-
-            ZERO_ORIENT_SURREAL = True
-            if ZERO_ORIENT_SURREAL:
-                import consts
-                bodypose_labels[:, :3] = np.array(consts.SURREAL_ORIENT_AVG)
-
-            bodypose_labels = bodypose_labels.astype(np.float32)
-
-            labels = np.concatenate((labels, bodypose_labels), axis=-1)
-
-        # else:
-        #     # assert False
-        #     labels = labels[:, :25]
-        #     labels = np.concatenate([labels, np.zeros((labels.shape[0], 107-25), dtype=np.float32)], axis=-1)
-        # Ensure that the label dim has body poses
-        assert labels.shape[-1] == 107 or labels.shape[-1] == 110, labels.shape
-        if labels.shape[-1] == 110:
-            print(f'MODEL WITH SMPL TRANSLATION!')
-
-        # AWB CHANGE: Load in warpings
-        if 'warpings_precomputed.mat' in self._all_fnames:
-            # This is faster and hence preferred.
-            import scipy.io as sio
-            warping_labels = sio.loadmat(self._open_file('warpings_precomputed.mat'))
-        elif 'warpings_precomputed.json' in self._all_fnames:
-            with self._open_file('warpings_precomputed.json') as f: warping_labels = json.load(f)
-        else:
-            warping_labels = None
-
-        if warping_labels is not None:
-            warping_labels = dict(warping_labels)
-            warping_labels = [warping_labels[fname][0] for fname in self._image_fnames]
-            warping_labels = np.array(warping_labels)
-            warping_labels = warping_labels.astype(np.float32)
-        else:
-            # warping_labels = np.zeros((labels.shape[0], 16*16*16*3)).astype(np.float32)
-            warping_labels = np.zeros((labels.shape[0], 1)).astype(np.float32)
-
-        labels = np.concatenate((labels, warping_labels), axis=-1)
-
         return labels
 
 #----------------------------------------------------------------------------
+
+import _util.util_v1 as uutil
+import _databacks.lustrous_v0 as dkmodlust
+class LustrousDatasetA(Dataset):
+    def __init__(
+        self,
+        name,
+        size,
+        subset,
+        transparent,
+        mirror,
+        max_size=None,
+        use_labels=True,
+        xflip=False,  # was True up to kongoC_n01 !!
+        random_seed=0,
+        **super_kwargs,
+    ):
+        # not used by super
+        self._subset = subset
+        self._bns = uutil.read_bns(f'./_data/lustrous/subsets/{self._subset}.csv', safe=True)
+        self._transparent = transparent
+        self._mirror = mirror
+        self._dk = dkmodlust._name2dk[name]()
+        
+        mlen = len(self._bns) if not self._mirror else 2*len(self._bns)
+        super().__init__(
+            name=name,
+            raw_shape=[mlen, (3,4)[self._transparent], size, size],
+            max_size=max_size,
+            use_labels=use_labels,
+            xflip=xflip,
+            random_seed=random_seed,
+            **{k:v for k,v in super_kwargs.items() if k!='resolution'},
+        )
+        return
+    def _load_raw_labels(self):
+        labs = dict(uutil.jread(
+            f'./_data/lustrous/renders/{self._name}/eg3d_labels.json'
+        )['labels'])
+        labs = np.stack([
+            labs[f'{mid[-1]}/{mid}/{iid}.png']
+            for mid,iid in [bn.split('/') for bn in uutil.unsafe_bns(self._bns)]
+        ]).astype(np.float32)
+        if self._mirror:
+            mlabs = labs.copy()
+            mlabs[:,[1,2,3,4,8]] *= -1
+            labs = np.concatenate([labs, mlabs])
+        return labs
+    def _load_raw_image(self, raw_idx):
+        if raw_idx>=len(self._bns):
+            mir = True
+            raw_idx -= len(self._bns)
+        else:
+            mir = False
+        img = self._dk[uutil.unsafe_bn(raw_idx, bns=self._bns)]['image']
+        img = img.resize(self._raw_shape[-2:])
+        if self._transparent:
+            img = img.convert('RGBA')
+        else:
+            img = img['rgb']
+        if mir:
+            img = img.fliph()
+        return img.uint8()
+
+# class LustrousDatasetA(Dataset):
+#     def __init__(self,
+#         name,
+#         path,                   # Path to directory or zip.
+#         path_subset,            # shu added
+#         # path_labels,            # shu added
+#         resolution      = None, # Ensure specific resolution, None = highest available.
+#         **super_kwargs,         # Additional arguments for the Dataset base class.
+#     ):
+#         self._path = path
+#         self._zipfile = None
+#         self._path_subset = path_subset
+#         self._path_labels = f'{self._path}/../eg3d_labels.json'
+
+#         # if os.path.isdir(self._path):
+#         #     self._type = 'dir'
+#         #     self._all_fnames = {os.path.relpath(os.path.join(root, fname), start=self._path) for root, _dirs, files in os.walk(self._path) for fname in files}
+#         # elif self._file_ext(self._path) == '.zip':
+#         #     self._type = 'zip'
+#         #     self._all_fnames = set(self._get_zipfile().namelist())
+#         # else:
+#         #     raise IOError('Path must point to a directory or zip')
+#         self._type = 'dir'
+
+#         PIL.Image.init()
+#         # self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
+#         with open(self._path_subset, 'r') as handle:
+#             bns = handle.read().split('\n')
+#         self._image_fnames = sorted([
+#             f'{path}/{mbn[-1]}/{bn}.png'
+#             for (mbn,ibn),bn in [
+#                 (bn.split('/'),bn) for bn in bns
+#             ]
+#         ])
+#         self._all_fnames = set(self._image_fnames)
+#         if len(self._image_fnames) == 0:
+#             raise IOError('No image files found in the specified path')
+
+#         # name = os.path.splitext(os.path.basename(self._path))[0]
+#         raw_shape = [len(self._image_fnames)] + list(self._load_raw_image(0).shape)
+#         if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
+#             raise IOError('Image files do not match the specified resolution')
+#         super().__init__(name=name, raw_shape=raw_shape, **super_kwargs)
+
+#     @staticmethod
+#     def _file_ext(fname):
+#         return os.path.splitext(fname)[1].lower()
+
+#     def _get_zipfile(self):
+#         assert self._type == 'zip'
+#         if self._zipfile is None:
+#             self._zipfile = zipfile.ZipFile(self._path)
+#         return self._zipfile
+
+#     def _open_file(self, fname):
+#         if self._type == 'dir':
+#             # return open(os.path.join(self._path, fname), 'rb')
+#             return open(fname, 'rb')
+#         if self._type == 'zip':
+#             return self._get_zipfile().open(fname, 'r')
+#         return None
+
+#     def close(self):
+#         try:
+#             if self._zipfile is not None:
+#                 self._zipfile.close()
+#         finally:
+#             self._zipfile = None
+
+#     def __getstate__(self):
+#         return dict(super().__getstate__(), _zipfile=None)
+
+#     def _load_raw_image(self, raw_idx):
+#         fname = self._image_fnames[raw_idx]
+#         # print(fname)
+#         with self._open_file(fname) as f:
+#             if pyspng is not None and self._file_ext(fname) == '.png':
+#                 image = pyspng.load(f.read())
+#             else:
+#                 image = np.array(PIL.Image.open(f))
+#         if image.ndim == 2:
+#             image = image[:, :, np.newaxis] # HW => HWC
+#         image = image.transpose(2, 0, 1) # HWC => CHW
+#         return image[:3]
+
+#     def _load_raw_labels(self):
+#         # fname = 'dataset.json'
+#         # if fname not in self._all_fnames:
+#         #     return None
+#         # with self._open_file(fname) as f:
+#         #     labels = json.load(f)['labels']
+#         # if labels is None:
+#         #     return None
+#         # labels = dict(labels)
+#         # labels = [labels[fname.replace('\\', '/')] for fname in self._image_fnames]
+#         # labels = np.array(labels)
+#         # labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+#         with open(self._path_labels) as handle:
+#             labels = json.load(handle)['labels']
+#         labels = dict(labels)
+#         labels = [
+#             labels[ fn[len(self._path)+1:] ]
+#             for fn in self._image_fnames
+#         ]
+#         labels = np.array(labels, dtype=np.float32)
+#         return labels
+
+
 #----------------------------------------------------------------------------

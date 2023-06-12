@@ -8,36 +8,41 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-"""Frechet Inception Distance (FID) from the paper
-"GANs trained by a two time-scale update rule converge to a local Nash
-equilibrium". Matches the original implementation by Heusel et al. at
-https://github.com/bioinf-jku/TTUR/blob/master/fid.py"""
+"""Kernel Inception Distance (KID) from the paper "Demystifying MMD
+GANs". Matches the original implementation by Binkowski et al. at
+https://github.com/mbinkowski/MMD-GAN/blob/master/gan/compute_scores.py"""
 
 import numpy as np
-import scipy.linalg
 from . import metric_utils
 
 #----------------------------------------------------------------------------
 
-def compute_fid(opts, max_real, num_gen):
+def compute_kid(opts, max_real, num_gen, num_subsets, max_subset_size):
     # Direct TorchScript translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
     detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
     detector_kwargs = dict(return_features=True) # Return raw features before the softmax layer.
 
-    mu_real, sigma_real = metric_utils.compute_feature_stats_for_dataset(
+    real_features = metric_utils.compute_feature_stats_for_dataset(
         opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
-        rel_lo=0, rel_hi=0, capture_mean_cov=True, max_items=max_real).get_mean_cov()
+        rel_lo=0, rel_hi=0, capture_all=True, max_items=max_real).get_all()
 
-    mu_gen, sigma_gen = metric_utils.compute_feature_stats_for_generator(
+    gen_features = metric_utils.compute_feature_stats_for_generator(
         opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
-        rel_lo=0, rel_hi=1, capture_mean_cov=True, max_items=num_gen).get_mean_cov()
+        rel_lo=0, rel_hi=1, capture_all=True, max_items=num_gen).get_all()
 
     if opts.rank != 0:
         return float('nan')
 
-    m = np.square(mu_gen - mu_real).sum()
-    s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen, sigma_real), disp=False) # pylint: disable=no-member
-    fid = np.real(m + np.trace(sigma_gen + sigma_real - s * 2))
-    return float(fid)
+    n = real_features.shape[1]
+    m = min(min(real_features.shape[0], gen_features.shape[0]), max_subset_size)
+    t = 0
+    for _subset_idx in range(num_subsets):
+        x = gen_features[np.random.choice(gen_features.shape[0], m, replace=False)]
+        y = real_features[np.random.choice(real_features.shape[0], m, replace=False)]
+        a = (x @ x.T / n + 1) ** 3 + (y @ y.T / n + 1) ** 3
+        b = (x @ y.T / n + 1) ** 3
+        t += (a.sum() - np.diag(a).sum()) / (m - 1) - b.sum() * 2 / m
+    kid = t / num_subsets / m
+    return float(kid)
 
 #----------------------------------------------------------------------------

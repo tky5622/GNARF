@@ -1,10 +1,12 @@
-# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 
 """Discriminator architectures from the paper
 "Efficient Geometry-aware 3D Generative Adversarial Networks"."""
@@ -107,6 +109,7 @@ class DualDiscriminator(torch.nn.Module):
         c_dim,                          # Conditioning label (C) dimensionality.
         img_resolution,                 # Input resolution.
         img_channels,                   # Number of input color channels.
+        cond_mode,
         architecture        = 'resnet', # Architecture: 'orig', 'skip', 'resnet'.
         channel_base        = 32768,    # Overall multiplier for the number of channels.
         channel_max         = 512,      # Maximum number of channels in any layer.
@@ -117,15 +120,12 @@ class DualDiscriminator(torch.nn.Module):
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
-        rendering_kwargs    = {},       # Rendering kwargs
     ):
         super().__init__()
-        self.rendering_kwargs = rendering_kwargs
         img_channels *= 2
 
+        self.cond_mode = cond_mode
         self.c_dim = c_dim
-        # AWB: condition on camera params and SMPL pose only
-        c_dim = 107
         self.img_resolution = img_resolution
         self.img_resolution_log2 = int(np.log2(img_resolution))
         self.img_channels = img_channels
@@ -150,21 +150,12 @@ class DualDiscriminator(torch.nn.Module):
             setattr(self, f'b{res}', block)
             cur_layer_idx += block.num_layers
         if c_dim > 0:
-            self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
+            self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, cond_mode=cond_mode, **mapping_kwargs)
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
         self.register_buffer('resample_filter', upfirdn2d.setup_filter([1,3,3,1]))
         self.disc_c_noise = disc_c_noise
 
-    def forward(self, img, c, update_emas=False, **block_kwargs):
-        # AWB change: condition on camera params and SMPL pose only
-        c = c[:, :107]
-        if self.rendering_kwargs['c_disc_bp_conditioning_zero']:
-            c_cam = c[:, :25]
-            c = torch.zeros_like(c)
-            c[:, :25] = c_cam
-        
-        # assert img['image_raw'].shape[-2:] == (64, 64)
-        # image_raw = torch.nn.functional.interpolate(img['image_raw'], size=img['image'].shape[-2:], mode='bilinear', align_corners=False)
+    def forward(self, img, c, cond, update_emas=False, **block_kwargs):
         image_raw = filtered_resizing(img['image_raw'], size=img['image'].shape[-1], f=self.resample_filter)
         img = torch.cat([img['image'], image_raw], 1)
 
@@ -177,7 +168,7 @@ class DualDiscriminator(torch.nn.Module):
         cmap = None
         if self.c_dim > 0:
             if self.disc_c_noise > 0: c += torch.randn_like(c) * c.std(0) * self.disc_c_noise
-            cmap = self.mapping(None, c)
+            cmap = self.mapping(None, c, cond)
         x = self.b4(x, img, cmap)
         return x
 

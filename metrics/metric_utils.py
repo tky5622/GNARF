@@ -1,10 +1,12 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 
 """Miscellaneous utilities used internally by the quality metrics."""
 
@@ -18,8 +20,8 @@ import numpy as np
 import torch
 import dnnlib
 
-# from SPIN import process_EG3D_image
-import consts
+import _util.pytorch_v1 as utorch
+
 
 #----------------------------------------------------------------------------
 
@@ -58,34 +60,25 @@ def get_feature_detector(url, device=torch.device('cpu'), num_gpus=1, rank=0, ve
 #----------------------------------------------------------------------------
 
 def iterate_random_labels(opts, batch_size):
-    if opts.G.c_dim == 0:
-        c = torch.zeros([batch_size, opts.G.c_dim], device=opts.device)
-        while True:
-            yield c
-    else:
-        dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
-        while True:
-            c = [dataset.get_label(np.random.randint(len(dataset))) for _i in range(batch_size)]
-            c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
-            yield c
-
-def iterate_random_imgs_labels(opts, batch_size):
+    # if opts.G.c_dim == 0:
+    #     c = torch.zeros([batch_size, opts.G.c_dim], device=opts.device)
+    #     while True:
+    #         yield c
+    # else:
+    #     dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
+    #     while True:
+    #         c = [dataset.get_label(np.random.randint(len(dataset))) for _i in range(batch_size)]
+    #         c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
+    #         yield c
     dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
-    if opts.G.c_dim == 0:
-        c = torch.zeros([batch_size, opts.G.c_dim], device=opts.device)
-        while True:
-            idx = [np.random.randint(len(dataset)) for _i in range(batch_size)]
-            img = torch.from_numpy(np.stack([dataset._load_raw_image(idx[_i]) for _i in range(batch_size)])).pin_memory().to(opts.device)
-            yield (img, c)
-    else:
-        while True:
-            idx = [np.random.randint(len(dataset)) for _i in range(batch_size)]
-            c = [dataset.get_label(idx[_i]) for _i in range(batch_size)]
-            img = [dataset._load_raw_image(idx[_i]) for _i in range(batch_size)]
-            c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
-            img = torch.from_numpy(np.stack(img)).pin_memory().to(opts.device)
-            yield (img, c)
-
+    while True:
+        c = [dataset.get_label(np.random.randint(len(dataset))) for _i in range(batch_size)]
+        c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
+        cond = utorch.default_collate([
+            dataset[np.random.randint(len(dataset))]['condition']
+            for _i in range(batch_size)
+        ], device=opts.device)
+        yield c, cond
 
 #----------------------------------------------------------------------------
 
@@ -225,7 +218,8 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
         # Choose cache file name.
         args = dict(dataset_kwargs=opts.dataset_kwargs, detector_url=detector_url, detector_kwargs=detector_kwargs, stats_kwargs=stats_kwargs)
         md5 = hashlib.md5(repr(sorted(args.items())).encode('utf-8'))
-        cache_tag = f'{dataset.name}-{get_feature_detector_name(detector_url)}-{md5.hexdigest()}'
+        # cache_tag = f'{dataset.name}-{get_feature_detector_name(detector_url)}-{md5.hexdigest()}'
+        cache_tag = f'{dataset.name}-{get_feature_detector_name(detector_url)}'
         cache_file = dnnlib.make_cache_dir_path('gan-metrics', cache_tag + '.pkl')
 
         # Check if the file exists (all processes must agree).
@@ -249,7 +243,9 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
 
     # Main loop.
     item_subset = [(i * opts.num_gpus + opts.rank) % num_items for i in range((num_items - 1) // opts.num_gpus + 1)]
-    for images, _labels in torch.utils.data.DataLoader(dataset=dataset, sampler=item_subset, batch_size=batch_size, **data_loader_kwargs):
+    # for images, _labels in torch.utils.data.DataLoader(dataset=dataset, sampler=item_subset, batch_size=batch_size, **data_loader_kwargs):
+    for sample in torch.utils.data.DataLoader(dataset=dataset, sampler=item_subset, batch_size=batch_size, **data_loader_kwargs):
+        images = sample['image']
         if images.shape[1] == 1:
             images = images.repeat([1, 3, 1, 1])
         features = detector(images.to(opts.device), **detector_kwargs)
@@ -286,7 +282,8 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
         images = []
         for _i in range(batch_size // batch_gen):
             z = torch.randn([batch_gen, G.z_dim], device=opts.device)
-            img = G(z=z, c=next(c_iter), **opts.G_kwargs)['image']
+            c, cond = next(c_iter)
+            img = G(z=z, c=c, cond=cond, **opts.G_kwargs)['image']
             img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             images.append(img)
         images = torch.cat(images)
@@ -298,66 +295,3 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
     return stats
 
 #----------------------------------------------------------------------------
-
-def compute_feature_stats_for_generator_warp_overwrite(opts, detector_url, detector_kwargs, rel_lo=0, rel_hi=1, batch_size=64, batch_gen=None, **stats_kwargs):
-    if batch_gen is None:
-        batch_gen = min(batch_size, 4)
-    assert batch_size % batch_gen == 0
-
-    # Setup generator and labels.
-    G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
-    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen)
-
-    # Initialize.
-    stats = FeatureStats(**stats_kwargs)
-    assert stats.max_items is not None
-    progress = opts.progress.sub(tag='generator features', num_items=stats.max_items, rel_lo=rel_lo, rel_hi=rel_hi)
-    detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
-
-    SPIN_processor = process_EG3D_image.EG3D_ImageProcessor(G.rendering_kwargs['cfg_name'], )
-
-    # Main loop.
-    while not stats.is_full():
-        images = []
-        for _i in range(batch_size // batch_gen):
-            cval = next(c_iter)
-            z = torch.randn([batch_gen, G.z_dim], device=opts.device)
-
-            G.rendering_kwargs['projector'] = 'none'
-            G.rendering_kwargs['project_inside_only'] = False
-            img = G(z=z, c=cval, **opts.G_kwargs)['image']
-            img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-
-            G.rendering_kwargs['projector'] = 'surface_field'
-            G.rendering_kwargs['project_inside_only'] = True
-            G.rendering_kwargs['cam2world'] = cval[:, :16].view(cval.shape[0], 4, 4)
-            G.rendering_kwargs['intrinsics'] = cval[:, 16:25].view(cval.shape[0], 3, 3)
-
-            params = [SPIN_processor.forward(img[i].permute(1,2,0)) for i in range(img.shape[0])]
-            betas = torch.cat([param['pred_betas'] for param in params], dim=0)
-            orients = torch.cat([param['global_orient'] for param in params], dim=0)
-            bodyposes = torch.cat([param['pred_rotmat'] for param in params], dim=0)[:, 3:]
-            if G.rendering_kwargs['cfg_name'] == 'surreal':
-                transl = torch.from_numpy(np.array(consts.SURREAL_TRANSL)).expand(betas.shape[0], -1).to(betas.device)
-            elif G.rendering_kwargs['cfg_name'] == 'aist' or G.rendering_kwargs['cfg_name'] == 'aist_rescaled' or G.rendering_kwargs['cfg_name'] == 'surreal_new':
-                transl = torch.from_numpy(np.array(consts.AIST_TRANSL)).expand(betas.shape[0], -1).to(betas.device)
-            else:
-                print(f"Error, unsupported dataset: {G.rendering_kwargs['cfg_name']}")
-                exit()
-
-            G.renderer.smpl_avg_body_pose = bodyposes
-            G.renderer.smpl_avg_orient = orients
-            G.renderer.smpl_avg_transl = transl
-            G.renderer.smpl_avg_betas = betas
-
-            img = G(z=z, c=cval, **opts.G_kwargs)['image']
-            img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-
-            images.append(img)
-        images = torch.cat(images)
-        if images.shape[1] == 1:
-            images = images.repeat([1, 3, 1, 1])
-        features = detector(images, **detector_kwargs)
-        stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
-        progress.update(stats.num_items)
-    return stats

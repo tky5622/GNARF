@@ -1,10 +1,12 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+﻿# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 
 """Streaming images and labels from datasets created with dataset_tool.py."""
 
@@ -15,7 +17,9 @@ import PIL.Image
 import json
 import torch
 import dnnlib
+#GNARF ADDED
 from pathlib import Path
+
 
 try:
     import pyspng
@@ -227,6 +231,13 @@ class ImageFolderDataset(Dataset):
         return image
 
     def _load_raw_labels(self):
+        #panic3d (original code)
+        # fname = 'dataset.json'
+        # if fname not in self._all_fnames:
+        #     return None
+        # with self._open_file(fname) as f:
+        #     labels = json.load(f)['labels']
+
         labels = None
         if 'dataset.mat' in self._all_fnames:
             # This is faster and hence preferred.
@@ -238,13 +249,13 @@ class ImageFolderDataset(Dataset):
                 labels = json.load(f)['labels']
         else:
             return None
+
         if labels is None:
             return None
         labels = dict(labels)
         labels = [labels[fname.replace('\\', '/')] for fname in self._image_fnames]
         labels = np.array(labels)
         labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
-
         # AWB CHANGE: Load in body poses as well, only if they are in a separate file
         if 'body_poses.json' in self._all_fnames:
             with self._open_file('body_poses.json') as f: bodypose_labels = json.load(f)
@@ -296,4 +307,67 @@ class ImageFolderDataset(Dataset):
         return labels
 
 #----------------------------------------------------------------------------
-#----------------------------------------------------------------------------
+
+import _util.util_v1 as uutil
+import _databacks.lustrous_v0 as dkmodlust
+class LustrousDatasetA(Dataset):
+    def __init__(
+        self,
+        name,
+        size,
+        subset,
+        transparent,
+        mirror,
+        max_size=None,
+        use_labels=True,
+        xflip=False,  # was True up to kongoC_n01 !!
+        random_seed=0,
+        **super_kwargs,
+    ):
+        # not used by super
+        self._subset = subset
+        self._bns = uutil.read_bns(f'./_data/lustrous/subsets/{self._subset}.csv', safe=True)
+        self._transparent = transparent
+        self._mirror = mirror
+        self._dk = dkmodlust._name2dk[name]()
+        
+        mlen = len(self._bns) if not self._mirror else 2*len(self._bns)
+        super().__init__(
+            name=name,
+            raw_shape=[mlen, (3,4)[self._transparent], size, size],
+            max_size=max_size,
+            use_labels=use_labels,
+            xflip=xflip,
+            random_seed=random_seed,
+            **{k:v for k,v in super_kwargs.items() if k!='resolution'},
+        )
+        return
+    def _load_raw_labels(self):
+        labs = dict(uutil.jread(
+            f'./_data/lustrous/renders/{self._name}/eg3d_labels.json'
+        )['labels'])
+        labs = np.stack([
+            labs[f'{mid[-1]}/{mid}/{iid}.png']
+            for mid,iid in [bn.split('/') for bn in uutil.unsafe_bns(self._bns)]
+        ]).astype(np.float32)
+        if self._mirror:
+            mlabs = labs.copy()
+            mlabs[:,[1,2,3,4,8]] *= -1
+            labs = np.concatenate([labs, mlabs])
+        return labs
+    def _load_raw_image(self, raw_idx):
+        if raw_idx>=len(self._bns):
+            mir = True
+            raw_idx -= len(self._bns)
+        else:
+            mir = False
+        img = self._dk[uutil.unsafe_bn(raw_idx, bns=self._bns)]['image']
+        img = img.resize(self._raw_shape[-2:])
+        if self._transparent:
+            img = img.convert('RGBA')
+        else:
+            img = img['rgb']
+        if mir:
+            img = img.fliph()
+        return img.uint8()
+

@@ -1,10 +1,12 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 
 """Network architectures from the paper
 "Analyzing and Improving the Image Quality of StyleGAN".
@@ -21,7 +23,6 @@ from torch_utils.ops import conv2d_resample
 from torch_utils.ops import upfirdn2d
 from torch_utils.ops import bias_act
 from torch_utils.ops import fma
-
 
 import _util.pytorch_v1 as utorch
 import _util.util_v1 as uutil
@@ -218,7 +219,6 @@ class MappingNetwork(torch.nn.Module):
         self.num_ws = num_ws
         self.num_layers = num_layers
         self.w_avg_beta = w_avg_beta
-
         ## panic3d added
         self.cond_mode = cond_mode
         cm = self.cond_mode.split('.')
@@ -533,7 +533,8 @@ class SynthesisNetwork(torch.nn.Module):
                 self.num_ws += block.num_torgb
             setattr(self, f'b{res}', block)
 
-    def forward(self, ws, **block_kwargs):
+    # panic3d added  #     def forward(self, ws, **block_kwargs):
+    def forward(self, ws, cond, latent_injection=None, stop_level=None, return_more=False, **block_kwargs):
         block_ws = []
         with torch.autograd.profiler.record_function('split_ws'):
             misc.assert_shape(ws, [None, self.num_ws, self.w_dim])
@@ -545,10 +546,185 @@ class SynthesisNetwork(torch.nn.Module):
                 w_idx += block.num_conv
 
         x = img = None
-        for res, cur_ws in zip(self.block_resolutions, block_ws):
+        doximgs = return_more or (stop_level!=None)
+        if doximgs:
+            ximgs = []
+        cm = set(self.cond_mode.split('.'))
+        chonkadd = [int(c.split('_')[-1]) for c in cm if c.startswith('reschonk_add_')]
+        chonkadd = 0 if len(chonkadd)==0 else chonkadd[0]
+        for lvl,(res, cur_ws) in enumerate(zip(self.block_resolutions, block_ws)):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
-        return img
+
+            # apply image condition
+            if self.cond_mode=='none':
+                pass
+
+            # resnet chonker overrides res=8
+            elif (res==8) and (chonkadd > 0):
+                ch = chonkadd
+                x = torch.cat([
+                    x[:,:ch] + cond['resnet_chonk'][:,:ch],
+                    x[:,ch:],
+                ], dim=1)
+
+            # carry on
+            else:
+                # orthographic front condition
+                if self.cond_mode.startswith('ortho_front.'):
+
+                    # reshape condition
+                    cimg = cond['image_ortho_front'].flip(dims=(-2,))
+
+                    # add gt for debug
+                    if 'gt_sides' in cm:
+                        # print(cond.keys())
+                        cimg = torch.cat([
+                            cimg,
+                            cond['image_ortho_left'].permute(0,1,3,2).flip(dims=(-1,-2)),
+                            cond['image_ortho_right'].permute(0,1,3,2).flip(dims=(-1,)),
+                        ], dim=1)
+
+                    # add dortho
+                    if 'dorthoA' in cm:
+                        cimg = torch.cat([
+                            cimg,
+                            cond['image_dorthoA_left'].permute(0,1,3,2).flip(dims=(-1,-2)),
+                            cond['image_dorthoA_right'].permute(0,1,3,2).flip(dims=(-1,)),
+                        ], dim=1)
+
+                    # normalize image
+                    cimg = cimg *2-1
+                    if 'cond_img_norm_4' in cm:
+                        cimg = 4 * cimg
+
+                    # addition, replacement, or multiplication
+                    if 'add_4' in cm:
+                        toadd = cimg
+                        toadd = torch.nn.functional.interpolate(toadd, size=x.shape[-2:], mode='bilinear')
+                        # if lvl<len(self.block_resolutions)-2:
+                        #     # resize
+                        #     toadd = torch.nn.functional.interpolate(toadd, size=x.shape[-2:], mode='bilinear')
+                        # else:
+                        #     # shuffle
+                        #     f = toadd.shape[-1] // x.shape[-1]
+                        #     toadd = utorch.einops.rearrange(toadd, 'bs ch (h i) (w j) -> bs (i j ch) h w', i=f, j=f)
+                        reps = int((x.shape[1] / 4) // toadd.shape[1])
+                        # print(x.shape[1], toadd.shape[1], reps)
+                        toadd = toadd.repeat(1,reps,1,1)
+
+                        # add to last channels of x
+                        ch = toadd.shape[1]
+                        x = torch.cat([
+                            x[:,:-ch],
+                            x[:,-ch:] + toadd,
+                        ], dim=1)
+                    if 'concatfront' in cm:
+                        toadd = cimg
+                        toadd = torch.nn.functional.interpolate(toadd, size=x.shape[-2:], mode='bilinear')
+
+                        # replace last channels of x
+                        ch = toadd.shape[1]
+                        x = torch.cat([
+                            x[:,:-ch],
+                            toadd,
+                            # x[:,-ch:] + toadd,
+                        ], dim=1)
+                    if 'add_shuffle2_4' in cm or 'mult_shuffle2_4' in cm:
+                        toadd = cimg
+                        if lvl<len(self.block_resolutions)-2:
+                            # resize
+                            toadd = torch.nn.functional.interpolate(toadd, size=x.shape[-2:], mode='bilinear')
+                        else:
+                            # shuffle
+                            f = toadd.shape[-1] // x.shape[-1]
+                            toadd = utorch.einops.rearrange(toadd, 'bs ch (h i) (w j) -> bs (i j ch) h w', i=f, j=f)
+                        reps = int((x.shape[1] / 4) // toadd.shape[1])
+                        # print(x.shape[1], toadd.shape[1], reps)
+                        toadd = toadd.repeat(1,reps,1,1)
+
+                        # visualize
+                        # if True:
+                        #     # print(lvl, 'mean', x.mean())
+                        #     # print(lvl, 'std', x.std())
+                        #     plt = uutil.plt
+                        #     fig = plt.figure()
+                        #     plt.hist(x.flatten().cpu().numpy(), bins=100)
+                        #     plt.grid()
+                        #     plt.title(f'{lvl}')
+                        #     u2d.I(fig).save(uutil.mkfile(f'/dev/shm/_xs/{lvl}.png'))
+                        #     plt.close()
+
+                        # add to last channels of x
+                        ch = toadd.shape[1]
+                        x = torch.cat([
+                            x[:,:-ch],
+                            (
+                                x[:,-ch:] + toadd
+                                if 'add_shuffle2_4' in cm else
+                                x[:,-ch:] * toadd
+                            ),
+                        ], dim=1)
+
+                    # addition or multiplication
+                    if 'inj_6b_4' in cm and res==self.block_resolutions[-1]:
+                        # print('YES IT IS WORKING')
+                        # toadd = cimg
+                        toadd = (cond['image_ortho_front'].flip(dims=(-2,)) *2-1) * 4
+                        toadd = torch.nn.functional.interpolate(toadd, size=img.shape[-2:], mode='bilinear')
+                        
+                        # add to first channels of img
+                        ch = toadd.shape[1]
+                        img = torch.cat([
+                            img[:,:ch] + toadd,
+                            img[:,ch:],
+                        ], dim=1)
+
+                # cross average
+                if 'crossavg_4' in cm:
+                    ch = int(x.shape[1] // (4*2))
+                    horz = x[:,0:ch]
+                    vert = x[:,ch:ch+ch]
+                    x = torch.cat([
+                        horz.mean(dim=-1, keepdims=True).expand(horz.shape),
+                        vert.mean(dim=-2, keepdims=True).expand(vert.shape),
+                        x[:,ch+ch:],
+                    ], dim=1)
+                elif 'crossavgt_38' in cm:
+                    ch = int(x.shape[1] // 8)
+                    horz = x[:,0*ch:1*ch]
+                    vert = x[:,1*ch:2*ch]
+                    tran = x[:,2*ch:3*ch]
+                    x = torch.cat([
+                        horz.mean(dim=-1, keepdims=True).expand(horz.shape),
+                        vert.mean(dim=-2, keepdims=True).expand(vert.shape),
+                        tran.permute(0,1,3,2),
+                        x[:,3*ch:],
+                    ], dim=1)
+
+            # save result
+            if doximgs:
+                ximgs.append((x, img))
+
+            # apply latent injection
+            if latent_injection!=None:
+                if f'da_{lvl}' in latent_injection:
+                    x = x + latent_injection[f'da_{lvl}']
+                if f'db_{lvl}' in latent_injection:
+                    img = img + latent_injection[f'db_{lvl}']
+
+        if stop_level==None:
+            ret = img
+        else:
+            ret = ximgs[stop_level][1]
+            for i in range(stop_level+1, len(self.block_resolutions)):
+                res = self.block_resolutions[i]
+                block = getattr(self, f'b{res}')
+                ret = upfirdn2d.upsample2d(ret, block.resample_filter)
+        if not return_more:
+            return ret
+        else:
+            return ret, locals()
 
     def extra_repr(self):
         return ' '.join([
@@ -566,6 +742,7 @@ class Generator(torch.nn.Module):
         w_dim,                      # Intermediate latent (W) dimensionality.
         img_resolution,             # Output resolution.
         img_channels,               # Number of output color channels.
+        cond_mode,                  # Panic3d
         mapping_kwargs      = {},   # Arguments for MappingNetwork.
         **synthesis_kwargs,         # Arguments for SynthesisNetwork.
     ):
@@ -575,15 +752,16 @@ class Generator(torch.nn.Module):
         self.w_dim = w_dim
         self.img_resolution = img_resolution
         self.img_channels = img_channels
-        self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
+        self.cond_mode = cond_mode #Panic3d
+        self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, cond_mode=cond_mode, **synthesis_kwargs) #panic3d
         self.num_ws = self.synthesis.num_ws
-        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
-
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
-        ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
-        img = self.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
+        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, cond_mode=cond_mode, **mapping_kwargs)
+        return
+    def forward(self, z, c, cond, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
+        ws = self.mapping(z, c, cond, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
+        img = self.synthesis(ws, cond, update_emas=update_emas, **synthesis_kwargs)
         return img
-
+    # cond variables are added to the each function
 #----------------------------------------------------------------------------
 
 @persistence.persistent_class
@@ -771,6 +949,7 @@ class Discriminator(torch.nn.Module):
         c_dim,                          # Conditioning label (C) dimensionality.
         img_resolution,                 # Input resolution.
         img_channels,                   # Number of input color channels.
+        cond_mode,                      # Panic3d
         architecture        = 'resnet', # Architecture: 'orig', 'skip', 'resnet'.
         channel_base        = 32768,    # Overall multiplier for the number of channels.
         channel_max         = 512,      # Maximum number of channels in any layer.
@@ -782,6 +961,7 @@ class Discriminator(torch.nn.Module):
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
     ):
         super().__init__()
+        self.cond_mode = cond_mode # Panic3d
         self.c_dim = c_dim
         self.img_resolution = img_resolution
         self.img_resolution_log2 = int(np.log2(img_resolution))
@@ -807,10 +987,10 @@ class Discriminator(torch.nn.Module):
             setattr(self, f'b{res}', block)
             cur_layer_idx += block.num_layers
         if c_dim > 0:
-            self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
+            self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, cond_mode=cond_mode, **mapping_kwargs) #cond_mode is added by panic3d
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
 
-    def forward(self, img, c, update_emas=False, **block_kwargs):
+    def forward(self, img, c, cond, update_emas=False, **block_kwargs): #cond is added by panic3d
         _ = update_emas # unused
         x = None
         for res in self.block_resolutions:
@@ -819,7 +999,7 @@ class Discriminator(torch.nn.Module):
 
         cmap = None
         if self.c_dim > 0:
-            cmap = self.mapping(None, c)
+            cmap = self.mapping(None, c, cond) #cond is added by panic3d
         x = self.b4(x, img, cmap)
         return x
 
@@ -827,3 +1007,15 @@ class Discriminator(torch.nn.Module):
         return f'c_dim={self.c_dim:d}, img_resolution={self.img_resolution:d}, img_channels={self.img_channels:d}'
 
 #----------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+

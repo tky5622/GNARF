@@ -93,6 +93,8 @@ def sample_from_planes(
 
     # panic3d add triplane_depth
     # normal eg3d = GNARF    
+    # this is explained at pano head paper
+    # https://arxiv.org/pdf/2303.13071.pdf
     if triplane_depth==1:  # normal eg3d
         assert padding_mode == 'zeros'
         N, n_planes, C, H, W = plane_features.shape
@@ -116,13 +118,23 @@ def sample_from_planes(
             ).permute(0, 3, 2, 1).reshape(N, n_planes, M, C)
         return output_features
     
-    else:  # yichuns multiplane
+    else:   
+        # yichuns multiplane
+        ## We call this enriched
+        ## version as a tri-grid. Instead of having three planes with
+        ## a shape of H × W × C with H and W being the spatial
+        ## resolution and C being the number of channel, each of our
+
+        ## tri-grid has a shape of D × H × W × C, where D represents the depth. For instance, to represent spatial features
+        ## on the XY plane, tri-grid will have D axis-aligned feature
+        ## planes P_i'XY i, i = 1, . . . , D uniformly distributed along the Z axis
         # try to run this multiplane with GNARF
         assert padding_mode == 'zeros'
         N, n_planes, CD, H, W = plane_features.shape
         _, M, _ = coordinates.shape
         C, D = CD // triplane_depth, triplane_depth
         plane_features = plane_features.view(N*n_planes, C, D, H, W)
+        # trigrid (multiplane) has 
 
         # coordinates = (2/box_warp) * coordinates # TODO: add specific box bounds
         # this condtion is added by GNARF
@@ -139,6 +151,8 @@ def sample_from_planes(
             align_corners=False
             ).permute(0, 4, 3, 2, 1).reshape(N, n_planes, M, C)
         return output_features
+
+
 
 # def project_onto_planes(planes, coordinates):
 #     """

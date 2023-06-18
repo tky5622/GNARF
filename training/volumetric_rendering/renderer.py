@@ -401,6 +401,7 @@ class ImportanceRenderer(torch.nn.Module):
             triplane_depth=1 if 'triplane_depth' not in options else options['triplane_depth']
             )
 
+        ## TODO: we need to check if decoder can adopt mutiplane ver sampled_features
         out = decoder(sampled_features, sample_directions)
         if options.get('density_noise', 0) > 0:
             out['sigma'] += torch.randn_like(out['sigma']) * options['density_noise']

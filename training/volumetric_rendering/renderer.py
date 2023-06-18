@@ -272,24 +272,8 @@ class ImportanceRenderer(torch.nn.Module):
             ):
         # self.plane_axes.requires_grad = False
         # assert self.plane_axes.requi  res_grad == False
-
         # GANRF add below sections 
         self.plane_axes = self.plane_axes.to(ray_origins.device)
-        # renderers.smpl_rendering(
-        #     smpl_params, 
-        #     self.smpl_avg_body_pose, 
-        #     self.smpl_avg_transl, 
-        #     rendering_options, 
-        #     ray_directions, 
-        #     self.get_ray_limits_box,
-        #     ray_origins,
-        #     self.smpl_clip,
-        #     self.smpl_avg_betas,
-        #     self.smpl_avg_scale,
-        #     camera_params,
-        #     self.get_smpl_min_max_depth,
-        #     self.sample_stratified,
-        # )
         smpl_translate = renderers.generate_smpl_translate(smpl_params, self.smpl_avg_body_pose, self.smpl_avg_transl)
         sample_mask, ray_start, ray_end = renderers.generate_smpl_sample(
             rendering_options,
@@ -306,20 +290,21 @@ class ImportanceRenderer(torch.nn.Module):
             camera_params,
             self.get_smpl_min_max_depth,
         )
+
         depths_coarse = renderers.generate_depths_coarse(
-                    rendering_options, 
+                    rendering_options,  
                     ray_origins,
                     self.sample_stratified,
                     ray_start, ray_end
         )
         # panic3d
-        # depths_coarse = renderers.generate_depths_cpanic3d_rendering(
-        #     rendering_options,
-        #     math_utils,
-        #     ray_origins,
-        #     ray_directions,
-        #     self.sample_stratified #self
-        # )
+        depths_coarse = renderers.generate_depths_cpanic3d_rendering(
+            rendering_options,
+            math_utils,
+            ray_origins,
+            ray_directions,
+            self.sample_stratified #self
+        )
 
         batch_size, num_rays, samples_per_ray, _ = depths_coarse.shape
         #GNARF
@@ -336,100 +321,50 @@ class ImportanceRenderer(torch.nn.Module):
         densities_coarse = out['sigma']
         xyz_coarse = out['xyz']
         #add renderingfunction here() calc_mask
-        # if triplane_crop:
-        #     # print(xyz_fine.amin(dim=(0,1)))
-        #     # print(xyz_fine.amax(dim=(0,1)))
-        #     cropmask = triplane_crop_mask(xyz_coarse, triplane_crop, rendering_options['box_warp'])
-        #     densities_coarse[cropmask] = -1e3
-        # if binarize_clouds:
-        #     ccmask = cull_clouds_mask(densities_coarse, binarize_clouds)
-        #     densities_coarse[ccmask] = -1e3
-        #     densities_coarse[~ccmask] = 1e3
-        # elif cull_clouds:
-        #     ccmask = cull_clouds_mask(densities_coarse, cull_clouds)
-        #     densities_coarse[ccmask] = -1e3
-        # # if triplane_crop:
-        # #     cropmask = triplane_crop_mask(xyz_coarse, triplane_crop, rendering_options['box_warp'])
-        # #     densities_coarse[cropmask] = -1e3
-        # # print(out['rgb'].shape)
-        # # print(out['sigma'].shape)
+        ccmask, densities_coarse, cropmask = renderers.calc_mask(
+            triplane_crop, 
+            triplane_crop_mask, 
+            xyz_coarse,
+            densities_coarse,
+            binarize_clouds,
+            cull_clouds_mask,
+            cull_clouds,
+            rendering_options
+        )
         colors_coarse = colors_coarse.reshape(batch_size, num_rays, samples_per_ray, colors_coarse.shape[-1])
         xyz_coarse = xyz_coarse.reshape(batch_size, num_rays, samples_per_ray, xyz_coarse.shape[-1])
-        densities_coarse = densities_coarse.reshape(batch_size, num_rays, samples_per_ray, 1)
-        #mask_out_invalid_samples()
+        densities_coarse = densities_coarse.reshape(batch_size, num_rays, samples_per_ray, 1)        
+        is_sample_valid, densities_coarse = renderers.mask_out_invalid_samples(
+            self.smpl_clip_depths, self.get_sample_mask, depths_coarse)
 
         # Fine Pass
-        N_importance = rendering_options['depth_resolution_importance']
-        if N_importance > 0:
-            _, _, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
-
-            depths_fine = self.sample_importance(depths_coarse, weights, N_importance)
-            #GNARF
-            # sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, N_importance, -1).reshape(batch_size, -1, 3)
-            sample_coordinates = (ray_origins.unsqueeze(-2) + depths_fine * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
-            
-            # shu added: have all directions point to center (for ambient-lit)
-            if rendering_options.get('directionless', False):
-                sample_directions = -sample_coordinates/sample_coordinates.norm(dim=-1, keepdim=True).clip(0.01)
-            # this option is for GNARF
-            elif rendering_options['box_warp_pre_deform']:
-                sample_coordinates = (2 / rendering_options['box_warp']) * sample_coordinates
-                sample_coordinates = self.get_canonical_coordinates(
-                sample_coordinates,
-                mask=sample_mask,
-                warp_field=warp_grid,
-                smpl_src=smpl_reduced_current,
-                smpl_dst=smpl_reduced_canon,
-                projector=rendering_options['projector']
-            )
-            else:
-                sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, N_importance, -1).reshape(batch_size, -1, 3)
-
-            out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
-            colors_fine = out['rgb']
-            densities_fine = out['sigma']
-            ##panic3d
-            xyz_fine = out['xyz']
-            if triplane_crop:
-                # print(xyz_fine.amin(dim=(0,1)))
-                # print(xyz_fine.amax(dim=(0,1)))
-                cropmask = triplane_crop_mask(xyz_fine, triplane_crop, rendering_options['box_warp'])
-                densities_fine[cropmask] = -1e3
-            if binarize_clouds:
-                ccmask = cull_clouds_mask(densities_fine, binarize_clouds)
-                densities_fine[ccmask] = -1e3
-                densities_fine[~ccmask] = 1e3
-            elif cull_clouds:
-                ccmask = cull_clouds_mask(densities_fine, cull_clouds)
-                densities_fine[ccmask] = -1e3
-            #end
-            colors_fine = colors_fine.reshape(batch_size, num_rays, N_importance, colors_fine.shape[-1])
-            densities_fine = densities_fine.reshape(batch_size, num_rays, N_importance, 1)
-            #panic3d
-            xyz_fine = xyz_fine.reshape(batch_size, num_rays, N_importance, xyz_fine.shape[-1])
-            #mask_out_clip_depth()
-            #original GNARF code
-            #all_depths, all_colors, all_densities = self.unify_samples(depths_coarse, colors_coarse, densities_coarse,
-            #all_xyz, depths_coarse, colors_coarse, densities_coarse, xyz_coarse xyz_fine
-            all_depths, all_colors, all_densities, all_xyz = self.unify_samples(
-                depths_coarse, colors_coarse, densities_coarse, xyz_coarse,
-                depths_fine, colors_fine, densities_fine, xyz_fine,
-            )
-
-            # Aggregate
-            #GNARF
-            # rgb_final, depth_final, weights = self.ray_marcher(all_colors, all_densities, all_depths, rendering_options)
-            all_colors_ = torch.cat([all_colors, all_xyz], dim=-1)
-            rgb_final_, depth_final, weights = self.ray_marcher(all_colors_, all_densities, all_depths, rendering_options)
-            rgb_final = rgb_final_[...,:-3]
-            xyz_final = rgb_final_[...,-3:]
-        else:
-            #GNARF
-            # rgb_final, depth_final, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
-            colors_coarse_ = torch.cat([colors_coarse, xyz_coarse], dim=-1)
-            rgb_final_, depth_final, weights = self.ray_marcher(colors_coarse_, densities_coarse, depths_coarse, rendering_options)
-            rgb_final = rgb_final_[...,:-3]
-            xyz_final = rgb_final_[...,-3:]
+        rgb_final, xyz_final, depth_final, weights = renderers.generate_finals(
+            rendering_options,
+            self.ray_marcher, #self
+            colors_coarse,
+            densities_coarse,
+            depths_coarse,
+            self.sample_importance, #self
+            ray_origins,
+            ray_directions,
+            self.get_canonical_coordinates, #self
+            sample_mask,
+            warp_grid,
+            self.smpl_reduced_current,
+            self.smpl_reduced_canon,
+            self.run_model, #self
+            planes,
+            decoder,
+            triplane_crop,
+            triplane_crop_mask,
+            binarize_clouds,
+            cull_clouds_mask,
+            cull_clouds,
+            batch_size,
+            num_rays,
+            self.unify_samples, #self
+            xyz_coarse,
+        )
 
         # print(rgb_final.shape)
         # print(depth_final.shape)

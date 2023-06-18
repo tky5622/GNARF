@@ -1,31 +1,40 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+﻿# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 
 import sys
+##GNARF
 import pysdf
+##
 import copy
 import traceback
 import numpy as np
+#GNARF
 import scipy
+##
 import torch
 import torch.fft
 import torch.nn
 import matplotlib.cm
+##GNARF
 import matplotlib.pyplot as plt
 from pytorch3d.structures import Meshes, Pointclouds
-
+##
 import dnnlib
 from torch_utils.ops import upfirdn2d
 import legacy # pylint: disable=import-error
-
+## GNARF
 from torch_utils import misc
 from warping_utils import mvc_utils
+##
 from camera_utils import LookAtPoseSampler
+## GNARF
 from warping_utils import mesh_skinning
 from warping_utils import surface_field
 from smplx.utils import SMPLOutput
@@ -37,10 +46,15 @@ import cv2
 import trimesh
 from pathlib import Path
 import consts
-from SPIN import process_EG3D_image
+# from SPIN import process_EG3D_image
 
 import training.volumetric_rendering.renderer as renderer
 from training.triplane import TriPlaneGenerator
+##
+
+
+
+
 
 #----------------------------------------------------------------------------
 
@@ -74,6 +88,7 @@ def _lanczos_window(x, a):
     x = x.abs() / a
     return torch.where(x < 1, _sinc(x), torch.zeros_like(x))
 
+## GNARF
 def _complex_to_rgb(array):
     from matplotlib.colors import hsv_to_rgb
     hue = (np.angle(array)+np.pi)/np.pi/2
@@ -116,7 +131,7 @@ def _add_sdf_contour(img, vertices, faces, points_grid, plane='xy'):
     image_from_plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
     image_from_plot = image_from_plot.reshape((height, width, -1))
     return image_from_plot
-
+## GNARF
 #----------------------------------------------------------------------------
 
 def _construct_affine_bandlimit_filter(mat, a=3, amax=16, aflt=64, up=4, cutoff_in=1, cutoff_out=1):
@@ -195,10 +210,13 @@ class Renderer:
         self._end_event     = torch.cuda.Event(enable_timing=True)
         self._net_layers    = dict()    # {cache_key: [dnnlib.EasyDict, ...], ...}
         self._last_model_input = None
+        #GNARF
         self._deformer = None
         self._cached_data = dict()
         self._mesh_renderer = None
         self._point_renderer = None
+        ##
+
 
     def render(self, **args):
         self._is_timing = True
@@ -255,13 +273,21 @@ class Renderer:
 
     def _tweak_network(self, net):
         # Print diagnostics.
-        #for name, value in misc.named_params_and_buffers(net):
-        #    if name.endswith('.magnitude_ema'):
-        #        value = value.rsqrt().numpy()
-        #        print(f'{name:<50s}{np.min(value):<16g}{np.max(value):g}')
-        #    if name.endswith('.weight') and value.ndim == 4:
-        #        value = value.square().mean([1,2,3]).sqrt().numpy()
-        #        print(f'{name:<50s}{np.min(value):<16g}{np.max(value):g}')
+        #Panic3d added, gnarf merely return net
+        RELOAD_MODULES = False
+        if RELOAD_MODULES:
+            from training.triplane import TriPlaneGenerator
+            from torch_utils import misc
+            print("Reloading Modules!")
+            net_new = TriPlaneGenerator(*net.init_args, **net.init_kwargs).eval().requires_grad_(False).to(self._device)
+            misc.copy_params_and_buffers(net, net_new, require_all=True)
+            net_new.neural_rendering_resolution = net.neural_rendering_resolution
+            net_new.rendering_kwargs = net.rendering_kwargs
+            net = net_new
+            # net.rendering_kwargs['ray_start'] = 'auto'
+            # net.rendering_kwargs['ray_end'] = 'auto'
+            # net.rendering_kwargs['avg_camera_pivot'] = [0, 0, 0]
+                
         return net
 
     def _get_pinned_buf(self, ref):
@@ -292,8 +318,8 @@ class Renderer:
         x = (x * hi + 0.5).clamp(0, hi).to(torch.int64)
         x = torch.nn.functional.embedding(x, cmap)
         return x
-
-    @torch.no_grad()
+    # Gnarf added, just in case comment out
+    # @torch.no_grad()
     def _render_impl(self, res,
         pkl             = None,
         w0_seeds        = [[0, 1]],
@@ -313,15 +339,19 @@ class Renderer:
         fft_all         = True,
         fft_range_db    = 50,
         fft_beta        = 8,
+        #GNARF
         mesh_show       = True,
+
         input_transform = None,
         untransform     = False,
 
         yaw             = 0,
         pitch           = 0,
+        #PANIC 3d added
+        lookat_point    = (0, 0, 0.2),
         conditioning_yaw    = 0,
         conditioning_pitch  = 0,
-
+        #GNARF added
         avg_pose_path=None,
         avg_betas_path=None,
         avg_orient_path=None,
@@ -332,12 +362,16 @@ class Renderer:
         grid_size=16,
         only_warp_inside=False,
         visualize_sidebyside=False,
+        #end
 
         focal_length    = 4.2647,
         render_type     = 'image',
+        #panic3d added
+        do_backbone_caching = False,
 
         depth_mult            = 1,
         depth_importance_mult = 1,
+        #GNARF added 
         p_info = None,
         i_f = 0,
         projector_overwrite = None,
@@ -346,10 +380,15 @@ class Renderer:
         read_in_canonpose = None,
         write_output_frames = None,
         ray_bounds = None,
+        #end
     ):
         # Dig up network details.
-        # G = self.get_network(pkl, 'G_ema').eval().requires_grad_(False).to('cuda')
+        # panic3d do this
+        G = self.get_network(pkl, 'G_ema').eval().requires_grad_(False).to('cuda')
+
+                # G = self.get_network(pkl, 'G_ema').eval().requires_grad_(False).to('cuda')
         # CREATES NEW MODEL FOR LEGACY MODELS??
+        #GNARF do 
         RELOAD = True
         if RELOAD and not getattr(self, 'network_reloaded', 0):
             G = self.get_network(pkl, 'G_ema').eval().requires_grad_(False).to('cuda')
@@ -371,6 +410,7 @@ class Renderer:
         G.rendering_kwargs['ray_start'] = ray_bounds[0]
         G.rendering_kwargs['ray_end'] = ray_bounds[1]
         G.rendering_kwargs['box_warp_pre_deform'] = False
+        # end
         res.img_resolution = G.img_resolution
         res.num_ws = G.backbone.num_ws
         res.has_noise = any('noise_const' in name for name, _buf in G.backbone.named_buffers())
@@ -393,7 +433,7 @@ class Renderer:
             except np.linalg.LinAlgError:
                 res.error = CapturedException()
             G.synthesis.input.transform.copy_(torch.from_numpy(m))
-
+        # GNARF added
         FS = 2110
         FE = 2180
         # FS = 410
@@ -422,6 +462,7 @@ class Renderer:
                 mesh_pose = self.to_device(torch.from_numpy(np.asarray(mesh_pose, dtype='float32')))[None, ...]
 
 
+        # end gnarf
         # Generate random latents.
         all_seeds = [seed for seed, _weight in w0_seeds] + [stylemix_seed]
         all_seeds = list(set(all_seeds))
@@ -430,13 +471,27 @@ class Renderer:
         for idx, seed in enumerate(all_seeds):
             rnd = np.random.RandomState(seed)
             all_zs[idx] = rnd.randn(G.z_dim)
-            # if G.c_dim > 0:
-                # all_cs[idx, rnd.randint(G.c_dim)] = 1
-        forward_cam2world_pose = LookAtPoseSampler.sample(3.14/2 + conditioning_yaw, 3.14/2 + conditioning_pitch, torch.tensor([0, 0, 0.]), radius=G.rendering_kwargs.get('avg_camera_radius', 2.7))
+        ## panic3d added related to view point 
+        if lookat_point is None:
+            camera_pivot = torch.tensor(G.rendering_kwargs.get('avg_camera_pivot', (0, 0, 0)))
+        else:
+            # override lookat point provided
+            camera_pivot = torch.tensor(lookat_point)
+        camera_radius = G.rendering_kwargs.get('avg_camera_radius', 2.7)
+        # GNARF do this
+        # forward_cam2world_pose = LookAtPoseSampler.sample(3.14/2 + conditioning_yaw, 3.14/2 + conditioning_pitch, torch.tensor([0, 0, 0.]), radius=G.rendering_kwargs.get('avg_camera_radius', 2.7))
+        forward_cam2world_pose = LookAtPoseSampler.sample(3.14/2 + conditioning_yaw, 3.14/2 + conditioning_pitch, camera_pivot, radius=camera_radius)
+        #this line is not changed from gnarf
         intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]])
-        forward_label = torch.cat([forward_cam2world_pose.reshape(16), intrinsics.reshape(9)], 0)
-        all_cs[:, :25] = forward_label.numpy()
-        # all pose conditioning starts as zeros
+        conditioning_params = torch.cat([forward_cam2world_pose.reshape(16), intrinsics.reshape(9)], 0)
+        # name is changed to confitioning_params, but meaning if same to gnarf
+        # forward_label = torch.cat([forward_cam2world_pose.reshape(16), intrinsics.reshape(9)], 0)
+        all_cs[idx, :] = conditioning_params.numpy()
+        # gnarf do this
+        # all_cs[:, :25] = forward_label.numpy()
+        # # all pose conditioning starts as zeros
+        #end
+
 
         # Run mapping network.
         # w_avg = G.mapping.w_avg
@@ -454,14 +509,18 @@ class Renderer:
         w += w_avg
 
         # Run synthesis network.
-        synthesis_kwargs = dnnlib.EasyDict(noise_mode=noise_mode, force_fp32=force_fp32, cache_backbone=True)
+        # Run synthesis network.
+        # synthesis_kwargs = dnnlib.EasyDict(noise_mode=noise_mode, force_fp32=force_fp32, cache_backbone=True)
+        synthesis_kwargs = dnnlib.EasyDict(noise_mode=noise_mode, force_fp32=force_fp32, cache_backbone=do_backbone_caching)
         torch.manual_seed(random_seed)
 
         # Set camera params
-        pose = LookAtPoseSampler.sample(3.14/2 + yaw, 3.14/2 + pitch, torch.tensor([0, 0, 0]), radius=G.rendering_kwargs.get('avg_camera_radius', 2.7))
+        # pose = LookAtPoseSampler.sample(3.14/2 + yaw, 3.14/2 + pitch, torch.tensor([0, 0, 0]), radius=G.rendering_kwargs.get('avg_camera_radius', 2.7))
+        pose = LookAtPoseSampler.sample(3.14/2 + yaw, 3.14/2 + pitch, camera_pivot, radius=camera_radius)
         intrinsics = torch.tensor([[focal_length, 0, 0.5], [0, focal_length, 0.5], [0, 0, 1]])
-        # intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]])
         c = torch.cat([pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1).to(w.device)
+
+        ## GNARF ADDED THISA PART
         # TODO AWB: MIGHT NEED TO BE CHANGED FOR NEW MODELS, WHERE WARPING IS HACKED INTO CONDITIONING
         # c = torch.cat([c, torch.zeros(c.shape[0], 82+(16*16*16*3)).to(w.device)], 1)
         c = torch.cat([c, torch.zeros(c.shape[0], 82).to(w.device)], 1)
@@ -591,28 +650,31 @@ class Renderer:
             self._cached_data['cur_mesh'] = cur_meshes
         else:
             cur_meshes = self._cached_data['cur_mesh']
+        ## GNARF ADDED PART END
 
         # Backbone caching
-        if self._last_model_input is not None and torch.all(self._last_model_input == w):
+        ## do_backbone_caching is added by panic3d
+        if do_backbone_caching and self._last_model_input is not None and torch.all(self._last_model_input == w):
             synthesis_kwargs.use_cached_backbone = True
         else:
             synthesis_kwargs.use_cached_backbone = False
         self._last_model_input = w
         out, layers = self.run_synthesis_net(G, w, c, capture_layer=layer_name, **synthesis_kwargs)
-
+        ## GNARF
         if write_out_image:
             out_img = (np.clip(out['image'][0].permute(1,2,0).cpu().detach().numpy(), -1., 1.)) + 1 / 2.
             imageio.imwrite('./visualizer_output/'+write_out_image+'.png', out_img)
             out_dict = {"w": w[0].detach().cpu().numpy(), "img": out_img}
             sio.savemat('./visualizer_output/'+write_out_image+'.mat', out_dict)
-
-
+        ## end
         # Update layer list.
         cache_key = (G.synthesis, tuple(sorted(synthesis_kwargs.items())))
         if cache_key not in self._net_layers:
             if layer_name is not None:
                 torch.manual_seed(random_seed)
-                _out, layers = self.run_synthesis_net(G.synthesis, w, **synthesis_kwargs)
+                # gnarf do it 
+                # _out, layers = self.run_synthesis_net(G.synthesis, w, **synthesis_kwargs)
+                _out, layers = self.run_synthesis_net(G, w, c, **synthesis_kwargs)
             self._net_layers[cache_key] = layers
         res.layers = self._net_layers[cache_key]
 
@@ -653,6 +715,7 @@ class Renderer:
         img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8).permute(1, 2, 0)
         res.image = img
 
+        ## cmd+f "GNARF_LONG_CHANGE" GNARF ADDED this part (so long)
         img_size = res.image.shape[1]
         if mesh_show:
             from pytorch3d.renderer import (PerspectiveCameras,
@@ -1412,6 +1475,7 @@ class Renderer:
                 (Path(write_output_frames) / 'mesh').mkdir(0o777, True, True)
             out_fname = (Path(write_output_frames) / 'mesh' / f'{i_f:06d}.png')
             imageio.imwrite(out_fname, mesh_img.cpu().numpy())
+        ## GNARF_LONG_CHANGE end here
 
         # FFT.
         if fft_show:
@@ -1457,7 +1521,6 @@ class Renderer:
 
         hooks = [module.register_forward_hook(module_hook) for module in net.modules()]
         try:
-            # out = net(*args, **kwargs)
             out = net.synthesis(*args, **kwargs)
         except CaptureSuccess as e:
             out = e.out

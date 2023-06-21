@@ -31,7 +31,7 @@ class Loss:
         raise NotImplementedError()
 
 #----------------------------------------------------------------------------
-
+#this is added by panic 3d
 def mask_view_orthofront(front_xyz, front_alpha, view_xyz, view_alpha, boxwarp):
     fxyz,falpha,vxyz,valpha,bw = front_xyz, front_alpha, view_xyz, view_alpha, boxwarp
     fz = fxyz[:,2:3]
@@ -53,9 +53,22 @@ def mask_view_orthofront(front_xyz, front_alpha, view_xyz, view_alpha, boxwarp):
     # I(ans).convert('RGBA').bg().right(x_rgb_f.image)
     return ans
 
+    # def __init__(self, device, G, D, 
+    #              augment_pipe=None, r1_gamma=10, style_mixing_prob=0, 
+    #              pl_weight=0, pl_batch_shrink=2, pl_decay=0.01, pl_no_weight_grad=False, 
+    #              blur_init_sigma=0, blur_fade_kimg=0, r1_gamma_init=0, 
+    #              r1_gamma_fade_kimg=0, neural_rendering_resolution_initial=64, 
+    #              neural_rendering_resolution_final=None, 
+    #              neural_rendering_resolution_fade_kimg=0, 
+    #              gpc_reg_fade_kimg=1000, gpc_reg_prob=None, 
+    #              dual_discrimination=False, filter_mode='antialiased'):
+     
+
+
 class StyleGAN2LossOrthoCondA(Loss):
+ 
     def __init__(
-            self, device, G, D, lpips_model,
+            self, device, G, D, lpips_model, #   #lpips_model,  added by panic3d
             augment_pipe=None, r1_gamma=10, style_mixing_prob=0,
             pl_weight=0, pl_batch_shrink=2, pl_decay=0.01, pl_no_weight_grad=False,
             blur_init_sigma=0, blur_fade_kimg=0,
@@ -65,6 +78,7 @@ class StyleGAN2LossOrthoCondA(Loss):
             neural_rendering_resolution_fade_kimg=0,
             gpc_reg_fade_kimg=1000, gpc_reg_prob=None,
             dual_discrimination=False, filter_mode='antialiased',
+            # these are added by panic3d
             lambda_Gcond_lpips=10.0, lambda_Gcond_l1=1.0,
             lambda_Gcond_alpha_l2=0.0, lambda_Gcond_depth_l2=0.0,
             lambda_Gcond_sides_lpips=0.0, lambda_Gcond_sides_l1=0.0,
@@ -104,7 +118,8 @@ class StyleGAN2LossOrthoCondA(Loss):
         self.resample_filter = upfirdn2d.setup_filter([1,3,3,1], device=device)
         self.blur_raw_target = True
         assert self.gpc_reg_prob is None or (0 <= self.gpc_reg_prob <= 1)
-
+        
+        ## added by panic3d from here
         self.lpips_model = lpips_model
         self.lambda_Gcond_lpips = lambda_Gcond_lpips
         self.lambda_Gcond_l1 = lambda_Gcond_l1
@@ -153,20 +168,25 @@ class StyleGAN2LossOrthoCondA(Loss):
         else:
             assert 0
         return
-
+    ## end panic3d added parts
+    # def run_G(self, z, c, swapping_prob, neural_rendering_resolution, update_emas=False):
     def run_G(self, z, c, cond, swapping_prob, neural_rendering_resolution, update_emas=False):
         if swapping_prob is not None:
             c_swapped = torch.roll(c.clone(), 1, 0)
             c_gen_conditioning = torch.where(torch.rand((c.shape[0], 1), device=c.device) < swapping_prob, c_swapped, c)
         else:
             c_gen_conditioning = torch.zeros_like(c)
-
+        # ws = self.G.mapping(z, c_gen_conditioning, update_emas=update_emas)
         ws = self.G.mapping(z, c_gen_conditioning, cond, update_emas=update_emas)
         if self.style_mixing_prob > 0:
             with torch.autograd.profiler.record_function('style_mixing'):
                 cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                 cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
+                # ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, update_emas=False)[:, cutoff:]
                 ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, cond, update_emas=False)[:, cutoff:]
+        # original eg3d
+        # gen_output = self.G.synthesis(ws, c, neural_rendering_resolution=neural_rendering_resolution, update_emas=update_emas)
+        # panic3d
         # gen_output = self.G.synthesis(ws, c, cond, neural_rendering_resolution=neural_rendering_resolution, update_emas=update_emas)
         gen_output = self.G.f({
             'ws': ws,
@@ -178,7 +198,8 @@ class StyleGAN2LossOrthoCondA(Loss):
             'paste_params': self.paste_params,
         })
         return gen_output, ws
-
+    # def run_D(self, img, c, blur_sigma=0, blur_sigma_raw=0, update_emas=False):
+    # cond is added
     def run_D(self, img, c, cond, blur_sigma=0, blur_sigma_raw=0, update_emas=False):
         blur_size = np.floor(blur_sigma * 3)
         if blur_size > 0:
@@ -224,6 +245,8 @@ class StyleGAN2LossOrthoCondA(Loss):
             if blur_size > 0:
                 f = torch.arange(-blur_size, blur_size + 1, device=real_img_raw.device).div(blur_sigma).square().neg().exp2()
                 real_img_raw = upfirdn2d.filter2d(real_img_raw, f / f.sum())
+        # original eg3d
+        # real_img = {'image': real_img, 'image_raw': real_img_raw}
 
         real_img = {
             'image': real_img,
@@ -231,7 +254,7 @@ class StyleGAN2LossOrthoCondA(Loss):
             'image_raw_noblur': torch.nn.functional.interpolate(real_img, real_img_raw.shape[-1], mode='bilinear'),
         }
 
-
+        ## panic3d added
         ##### calc loss mask #####
 
         lmask = mask_view_orthofront(
@@ -479,6 +502,9 @@ class StyleGAN2LossOrthoCondA(Loss):
         # Gmain: Maximize logits for generated images.
         if phase in ['Gmain', 'Gboth']:
             with torch.autograd.profiler.record_function('Gmain_forward'):
+                # EG3d original code
+                # gen_img, _gen_ws = self.run_G(gen_z, gen_c, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution)
+                # gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
                 # forward
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_cond, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution)
                 
@@ -507,11 +533,12 @@ class StyleGAN2LossOrthoCondA(Loss):
                 # }, '/dev/shm/lmasks.pkl')
 
                 gen_logits = self.run_D(gen_img_foradv, gen_c, real_cond, blur_sigma=blur_sigma)
+                ## end here
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits)
                 training_stats.report('Loss/G/loss', loss_Gmain)
-
+                ## panic3d added
                 ######## reconstruction ########
 
                 if self.lossmask_mode_recon!='none':
@@ -571,8 +598,10 @@ class StyleGAN2LossOrthoCondA(Loss):
                 else:
                     loss_Grecon = torch.zeros_like(loss_Gmain)
                 # exit(0)
-
+            ## end here
             with torch.autograd.profiler.record_function('Gmain_backward'):
+                # loss_Gmain.mean().mul(gain).backward()
+                ## lodd_grecon is added
                 (loss_Gmain.mean().mul(gain) + loss_Grecon.mean()).backward()
 
         # Density Regularization
@@ -583,15 +612,18 @@ class StyleGAN2LossOrthoCondA(Loss):
             else:
                 c_gen_conditioning = torch.zeros_like(gen_c)
 
+            # real_cond added
             ws = self.G.mapping(gen_z, c_gen_conditioning, real_cond, update_emas=False)
             if self.style_mixing_prob > 0:
                 with torch.autograd.profiler.record_function('style_mixing'):
                     cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
+                    # real_cond added
                     ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, real_cond, update_emas=False)[:, cutoff:]
             initial_coordinates = torch.rand((ws.shape[0], 1000, 3), device=ws.device) * 2 - 1
             perturbed_coordinates = initial_coordinates + torch.randn_like(initial_coordinates) * self.G.rendering_kwargs['density_reg_p_dist']
             all_coordinates = torch.cat([initial_coordinates, perturbed_coordinates], dim=1)
+            #real_cond added
             sigma = self.G.sample_mixed(all_coordinates, torch.randn_like(all_coordinates), ws, real_cond, update_emas=False)['sigma']
             sigma_initial = sigma[:, :sigma.shape[1]//2]
             sigma_perturbed = sigma[:, sigma.shape[1]//2:]
@@ -606,13 +638,14 @@ class StyleGAN2LossOrthoCondA(Loss):
                 c_gen_conditioning = torch.where(torch.rand([], device=gen_c.device) < swapping_prob, c_swapped, gen_c)
             else:
                 c_gen_conditioning = torch.zeros_like(gen_c)
-
+            # real_cond added
             ws = self.G.mapping(gen_z, c_gen_conditioning, real_cond, update_emas=False)
 
             initial_coordinates = torch.rand((ws.shape[0], 2000, 3), device=ws.device) * 2 - 1 # Front
 
             perturbed_coordinates = initial_coordinates + torch.tensor([0, 0, -1], device=ws.device) * (1/256) * self.G.rendering_kwargs['box_warp'] # Behind
             all_coordinates = torch.cat([initial_coordinates, perturbed_coordinates], dim=1)
+            # real_cond added
             sigma = self.G.sample_mixed(all_coordinates, torch.randn_like(all_coordinates), ws, real_cond, update_emas=False)['sigma']
             sigma_initial = sigma[:, :sigma.shape[1]//2]
             sigma_perturbed = sigma[:, sigma.shape[1]//2:]
@@ -626,16 +659,18 @@ class StyleGAN2LossOrthoCondA(Loss):
                 c_gen_conditioning = torch.where(torch.rand([], device=gen_c.device) < swapping_prob, c_swapped, gen_c)
             else:
                 c_gen_conditioning = torch.zeros_like(gen_c)
-
+            # real_cond added
             ws = self.G.mapping(gen_z, c_gen_conditioning, real_cond, update_emas=False)
             if self.style_mixing_prob > 0:
                 with torch.autograd.profiler.record_function('style_mixing'):
                     cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
+                    # real_cond added
                     ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, real_cond, update_emas=False)[:, cutoff:]
             initial_coordinates = torch.rand((ws.shape[0], 1000, 3), device=ws.device) * 2 - 1
             perturbed_coordinates = initial_coordinates + torch.randn_like(initial_coordinates) * (1/256) * self.G.rendering_kwargs['box_warp']
             all_coordinates = torch.cat([initial_coordinates, perturbed_coordinates], dim=1)
+            # real_cond added
             sigma = self.G.sample_mixed(all_coordinates, torch.randn_like(all_coordinates), ws, real_cond, update_emas=False)['sigma']
             sigma_initial = sigma[:, :sigma.shape[1]//2]
             sigma_perturbed = sigma[:, sigma.shape[1]//2:]
@@ -650,13 +685,14 @@ class StyleGAN2LossOrthoCondA(Loss):
                 c_gen_conditioning = torch.where(torch.rand([], device=gen_c.device) < swapping_prob, c_swapped, gen_c)
             else:
                 c_gen_conditioning = torch.zeros_like(gen_c)
-
+            # real_cond added
             ws = self.G.mapping(gen_z, c_gen_conditioning, real_cond, update_emas=False)
 
             initial_coordinates = torch.rand((ws.shape[0], 2000, 3), device=ws.device) * 2 - 1 # Front
 
             perturbed_coordinates = initial_coordinates + torch.tensor([0, 0, -1], device=ws.device) * (1/256) * self.G.rendering_kwargs['box_warp'] # Behind
             all_coordinates = torch.cat([initial_coordinates, perturbed_coordinates], dim=1)
+            # real_cond added
             sigma = self.G.sample_mixed(all_coordinates, torch.randn_like(all_coordinates), ws, real_cond, update_emas=False)['sigma']
             sigma_initial = sigma[:, :sigma.shape[1]//2]
             sigma_perturbed = sigma[:, sigma.shape[1]//2:]
@@ -670,16 +706,18 @@ class StyleGAN2LossOrthoCondA(Loss):
                 c_gen_conditioning = torch.where(torch.rand([], device=gen_c.device) < swapping_prob, c_swapped, gen_c)
             else:
                 c_gen_conditioning = torch.zeros_like(gen_c)
-
+            # real_cond added
             ws = self.G.mapping(gen_z, c_gen_conditioning, real_cond, update_emas=False)
             if self.style_mixing_prob > 0:
                 with torch.autograd.profiler.record_function('style_mixing'):
                     cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
+                    # real_cond added
                     ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, real_cond, update_emas=False)[:, cutoff:]
             initial_coordinates = torch.rand((ws.shape[0], 1000, 3), device=ws.device) * 2 - 1
             perturbed_coordinates = initial_coordinates + torch.randn_like(initial_coordinates) * (1/256) * self.G.rendering_kwargs['box_warp']
             all_coordinates = torch.cat([initial_coordinates, perturbed_coordinates], dim=1)
+            # real_cond added
             sigma = self.G.sample_mixed(all_coordinates, torch.randn_like(all_coordinates), ws, real_cond, update_emas=False)['sigma']
             sigma_initial = sigma[:, :sigma.shape[1]//2]
             sigma_perturbed = sigma[:, sigma.shape[1]//2:]
@@ -691,8 +729,10 @@ class StyleGAN2LossOrthoCondA(Loss):
         loss_Dgen = 0
         if phase in ['Dmain', 'Dboth']:
             with torch.autograd.profiler.record_function('Dgen_forward'):
+                # real_cond added
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_cond, swapping_prob=swapping_prob, neural_rendering_resolution=neural_rendering_resolution, update_emas=True)
                 gen_logits = self.run_D(gen_img, gen_c, real_cond, blur_sigma=blur_sigma, update_emas=True)
+                # added end here
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Dgen = torch.nn.functional.softplus(gen_logits)
@@ -707,7 +747,7 @@ class StyleGAN2LossOrthoCondA(Loss):
                 real_img_tmp_image = real_img['image'].detach().requires_grad_(phase in ['Dreg', 'Dboth'])
                 real_img_tmp_image_raw = real_img['image_raw'].detach().requires_grad_(phase in ['Dreg', 'Dboth'])
                 real_img_tmp = {'image': real_img_tmp_image, 'image_raw': real_img_tmp_image_raw}
-
+                # real_cond added
                 real_logits = self.run_D(real_img_tmp, real_c, real_cond, blur_sigma=blur_sigma)
                 training_stats.report('Loss/scores/real', real_logits)
                 training_stats.report('Loss/signs/real', real_logits.sign())

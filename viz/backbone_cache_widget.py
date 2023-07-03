@@ -13,25 +13,22 @@ from gui_utils import imgui_utils
 
 #----------------------------------------------------------------------------
 
-class RenderTypeWidget:
+class BackboneCacheWidget:
     def __init__(self, viz):
-        self.viz        = viz
-        self.render_type = 0
-        self.render_types = ['image',     'image_depth', 'image_raw']
-        self.labels       = ['RGB Image', 'Depth Image', 'Neural Rendered Image']
+        self.viz            = viz
+        self.cache_backbone = True
 
     @imgui_utils.scoped_by_object_id
     def __call__(self, show=True):
         viz = self.viz
 
         if show:
-            imgui.text('Render Type')
-            imgui.same_line(viz.label_w)
-            with imgui_utils.item_width(viz.font_size * 10):
-                _clicked, self.render_type = imgui.combo('', self.render_type, self.labels)
-            #GNARF added this comment
-            # imgui.same_line(viz.label_w + viz.font_size * 13 + viz.button_w + viz.spacing * 3)
+            imgui.text('Cache Backbone')
+            imgui.same_line(viz.label_w + viz.spacing * 4)
+            _clicked, self.cache_backbone = imgui.checkbox('##backbonecache', self.cache_backbone)
+            imgui.same_line(viz.label_w + viz.spacing * 10)
+            imgui.text('Note that when enabled, you may be unable to view intermediate backbone weights below')
 
-        viz.args.render_type = self.render_types[self.render_type]
+        viz.args.do_backbone_caching = self.cache_backbone
 
 #----------------------------------------------------------------------------

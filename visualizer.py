@@ -1,10 +1,12 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
 
 import click
 import os
@@ -24,15 +26,19 @@ from viz import stylemix_widget
 from viz import trunc_noise_widget
 from viz import performance_widget
 from viz import capture_widget
+#panic3d add
+from viz import backbone_cache_widget
 from viz import layer_widget
+# GNARF
 from viz import equivariance_widget
 from viz import pose_widget
 from viz import zoom_widget
 from viz import conditioning_pose_widget
 from viz import render_type_widget
 from viz import render_depth_sample_widget
+# GNARF
 from viz import deformation_widget
-
+# GNARF
 import scipy.io
 from pathlib import Path
 
@@ -40,8 +46,13 @@ from pathlib import Path
 
 class Visualizer(imgui_window.ImguiWindow):
     def __init__(self, capture_dir=None, projector_overwrite=None):
-        super().__init__(title='Cat Machine', window_width=1920, window_height=1080)
+        # super().__init__(title='Cat Machine', window_width=1920, window_height=1080)
 
+        # self.projector_overwrite = projector_overwrite
+    # def __init__(self, capture_dir=None):
+        #panic3d chage the size of window
+        super().__init__(title='Cat Machine', window_width=3840, window_height=2160)
+        #GNARF add projector_overwrite
         self.projector_overwrite = projector_overwrite
 
         # Internals.
@@ -65,14 +76,17 @@ class Visualizer(imgui_window.ImguiWindow):
         self.trunc_noise_widget = trunc_noise_widget.TruncationNoiseWidget(self)
         self.perf_widget        = performance_widget.PerformanceWidget(self)
         self.capture_widget     = capture_widget.CaptureWidget(self)
+        #panic3d add
+        self.backbone_cache_widget     = backbone_cache_widget.BackboneCacheWidget(self)
         self.layer_widget       = layer_widget.LayerWidget(self)
+        #GNARF add
         self.eq_widget          = equivariance_widget.EquivarianceWidget(self)
         self.pose_widget        = pose_widget.PoseWidget(self)
         self.zoom_widget        = zoom_widget.ZoomWidget(self)
         self.conditioning_pose_widget        = conditioning_pose_widget.ConditioningPoseWidget(self)
         self.render_type_widget = render_type_widget.RenderTypeWidget(self)
         self.render_depth_sample_widget = render_depth_sample_widget.RenderDepthSampleWidget(self)
-        # Widgets for varying face/body pose parameters
+        # Widgets for varying face/body pose parameters GNARF add
         self.deformation_widget = deformation_widget.DeformationWidget(self, include=['pose', 'betas', 'orient'])
 
         if capture_dir is not None:
@@ -120,7 +134,7 @@ class Visualizer(imgui_window.ImguiWindow):
         self.set_font_size(min(self.content_width / 120, self.content_height / 60))
         if self.font_size != old:
             self.skip_frame() # Layout changed.
-
+    #GNARF add this (in panic3d, self only)
     def draw_frame(self, i_f=None, p_info=None, side_by_side_pkl=None, write_out_image=None, read_in_canonpose=None,
                    write_output_frames=None):
         self.begin_frame()
@@ -154,7 +168,10 @@ class Visualizer(imgui_window.ImguiWindow):
         self.perf_widget(expanded)
         self.capture_widget(expanded)
         expanded, _visible = imgui_utils.collapsing_header('Layers & channels', default=True)
+        #panic3d add
+        self.backbone_cache_widget(expanded)
         self.layer_widget(expanded)
+        #GNARF add this
         with imgui_utils.grayed_out(not self.result.get('has_input_transform', False)):
             expanded, _visible = imgui_utils.collapsing_header('Equivariance', default=True)
             self.eq_widget(expanded)
@@ -170,6 +187,8 @@ class Visualizer(imgui_window.ImguiWindow):
         elif self._defer_rendering > 0:
             self._defer_rendering -= 1
         elif self.args.pkl is not None:
+            #GNARF change this line
+            #self._async_renderer.set_args(**self.args) panic3d ver
             self._async_renderer.set_args(**self.args, i_f=i_f, p_info=p_info,
                                           projector_overwrite=self.projector_overwrite,
                                           side_by_side_pkl=side_by_side_pkl, write_out_image=write_out_image,
@@ -301,16 +320,19 @@ class AsyncRenderer:
 @click.argument('pkls', metavar='PATH', nargs=-1)
 @click.option('--capture-dir', help='Where to save screenshot captures', metavar='PATH', default=None)
 @click.option('--browse-dir', help='Specify model path for the \'Browse...\' button', metavar='PATH')
+#GNARF
 @click.option('--overwrite_bodypose_params', metavar='PATH', default=None)
 @click.option('--projector_overwrite', metavar='STR', default=None)
 @click.option('--side_by_side_pkl', metavar='STR', default=None)
 @click.option('--write_out_image', required=False, default=None)
 @click.option('--read_in_canonpose', required=False, default=None)
 @click.option('--write_output_frames', required=False, default=None)
+
 def main(
     pkls,
     capture_dir,
     browse_dir,
+    #GNARF add these
     overwrite_bodypose_params,
     projector_overwrite,
     side_by_side_pkl,
@@ -322,6 +344,7 @@ def main(
 
     Optional PATH argument can be used specify which .pkl file to load.
     """
+    #GNARF add this projector_overwrite
     viz = Visualizer(capture_dir=capture_dir, projector_overwrite=projector_overwrite)
 
     if browse_dir is not None:
@@ -329,6 +352,7 @@ def main(
 
     # List pickles.
     # pkls = ['/home/ericchan/Downloads/network-snapshot-002200.pkl']
+    # Gnarf do this
     if len(pkls) > 0:
         for pkl in pkls:
             viz.add_recent_pickle(pkl)
@@ -363,11 +387,23 @@ def main(
             'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-metfaces-1024x1024.pkl',
             'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-metfacesu-1024x1024.pkl'
         ]
+        #GNARF end
+    # panic3d do this. it doesn't have if condtion.
+    #     pretrained = [
+    #     'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/ffhq512-128.pkl',
+    #     'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/afhqcats512-128.pkl',
+    #     'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/ffhqrebalanced512-64.pkl',
+    #     'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/ffhqrebalanced512-128.pkl',
+    #     'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/shapenetcars128-64.pkl',
+    # ]
+
+
+
 
         # Populate recent pickles list with pretrained model URLs.
         for url in pretrained:
             viz.add_recent_pickle(url)
-
+    #GNARF add this
     if overwrite_bodypose_params is not None:
         if Path(overwrite_bodypose_params).suffix == ".npy":
             info = np.load(overwrite_bodypose_params)
@@ -381,7 +417,10 @@ def main(
     print(f'Total frames: {info.shape[0]}')
 
     i = 0
+    #end GNARF
+    
     # Run.
+    #GNARF customize it 
     while not viz.should_close():
         print(f'Frame: {i}')
         # if i == info.shape[0]-1:
@@ -392,6 +431,9 @@ def main(
             i = (i + 1) % info.shape[0]
     viz.close()
 
+    # panic3d's original code  
+    # while not viz.should_close():
+    #     viz.draw_frame()
 #----------------------------------------------------------------------------
 
 if __name__ == "__main__":
